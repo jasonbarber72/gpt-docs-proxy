@@ -18,11 +18,7 @@ def get_creds():
         creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
     else:
         flow = InstalledAppFlow.from_client_secrets_file(CREDS_FILE, SCOPES)
-        creds = flow.run_local_server(
-            port=8765,
-            access_type='offline',
-            prompt='consent'
-        )
+        creds = flow.run_console()
         with open(TOKEN_FILE, 'w') as token:
             token.write(creds.to_json())
     return creds
