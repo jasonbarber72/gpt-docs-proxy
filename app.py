@@ -13,6 +13,7 @@ SCOPES = [
 TOKEN_FILE = 'token.json'
 CREDS_FILE = 'credentials.json'
 
+
 def get_creds():
     if os.path.exists(TOKEN_FILE):
         creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
@@ -27,40 +28,32 @@ def get_creds():
             token.write(creds.to_json())
     return creds
 
+
 @app.route('/docs', methods=['GET'])
 def search_doc_by_name():
     title = request.args.get('title')
-    partial = request.args.get('partial', 'false').lower() == 'true'
-
     creds = get_creds()
     drive_service = build('drive', 'v3', credentials=creds)
-
-    if partial:
-        q = f"name contains '{title}' and mimeType='application/vnd.google-apps.document'"
-    else:
-        q = f"name = '{title}' and mimeType='application/vnd.google-apps.document'"
-
     results = drive_service.files().list(
-        q=q,
-        fields="files(id, name)",
-        pageSize=10
+        q=f"name = '{title}' and mimeType='application/vnd.google-apps.document'",
+        fields="files(id, name)", pageSize=1
     ).execute()
     files = results.get('files', [])
     return jsonify(files)
+
 
 @app.route('/docs/all', methods=['GET'])
 def list_all_docs():
     creds = get_creds()
     drive_service = build('drive', 'v3', credentials=creds)
-    query = "mimeType='application/vnd.google-apps.document'"
-
     results = drive_service.files().list(
-        q=query,
+        q="mimeType='application/vnd.google-apps.document'",
         fields="files(id, name)",
-        pageSize=100
+        pageSize=1000
     ).execute()
     files = results.get('files', [])
     return jsonify(files)
+
 
 @app.route('/docs/<doc_id>', methods=['GET'])
 def read_doc(doc_id):
@@ -79,6 +72,7 @@ def read_doc(doc_id):
                 text.append(text_run['content'])
     return jsonify({'text': ''.join(text)})
 
+
 @app.route('/docs/<doc_id>/write', methods=['POST'])
 def write_to_doc(doc_id):
     data = request.json
@@ -96,6 +90,7 @@ def write_to_doc(doc_id):
         body={'requests': requests}
     ).execute()
     return jsonify(result)
+
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
