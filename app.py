@@ -1,6 +1,5 @@
 from flask import Flask, request, jsonify
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 import os
 
@@ -16,17 +15,19 @@ CREDS_FILE = 'credentials.json'
 def get_creds():
     if os.path.exists(TOKEN_FILE):
         creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+        return creds
     else:
-        flow = InstalledAppFlow.from_client_secrets_file(CREDS_FILE, SCOPES)
-        creds = flow.run_console()
-        with open(TOKEN_FILE, 'w') as token:
-            token.write(creds.to_json())
-    return creds
+        # Do NOT prompt on server — just return error response
+        raise RuntimeError("Missing token.json. Please authorize this app locally first.")
 
 @app.route('/docs', methods=['GET'])
 def search_doc_by_name():
     title = request.args.get('title')
-    creds = get_creds()
+    try:
+        creds = get_creds()
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
     drive_service = build('drive', 'v3', credentials=creds)
     results = drive_service.files().list(
         q=f"name = '{title}' and mimeType='application/vnd.google-apps.document'",
@@ -37,7 +38,11 @@ def search_doc_by_name():
 
 @app.route('/docs/<doc_id>', methods=['GET'])
 def read_doc(doc_id):
-    creds = get_creds()
+    try:
+        creds = get_creds()
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
     docs_service = build('docs', 'v1', credentials=creds)
     document = docs_service.documents().get(documentId=doc_id).execute()
 
@@ -56,7 +61,12 @@ def read_doc(doc_id):
 def write_to_doc(doc_id):
     data = request.json
     text = data.get('text', '')
-    creds = get_creds()
+
+    try:
+        creds = get_creds()
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
     docs_service = build('docs', 'v1', credentials=creds)
     requests = [{
         'insertText': {
@@ -68,7 +78,7 @@ def write_to_doc(doc_id):
         documentId=doc_id,
         body={'requests': requests}
     ).execute()
-    return jsonify(result)
+    return jsonify({"status": "success", "result": result})
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))

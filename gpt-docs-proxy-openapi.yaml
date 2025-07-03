@@ -1,0 +1,84 @@
+openapi: 3.1.0
+info:
+  title: GPT Google Docs Proxy
+  description: Access, read, and write Google Docs using a Flask-based proxy with OAuth. Designed for GPT Actions.
+  version: 1.0.0
+servers:
+  - url: https://gpt-docs-proxy.onrender.com
+paths:
+  /docs:
+    get:
+      operationId: searchDocsByTitle
+      summary: Search for a Google Doc by title
+      parameters:
+        - name: title
+          in: query
+          required: true
+          schema:
+            type: string
+          description: The exact name of the Google Doc to search for
+      responses:
+        '200':
+          description: A list of matching documents
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:
+                      type: string
+                    name:
+                      type: string
+
+  /docs/{doc_id}:
+    get:
+      operationId: readDocById
+      summary: Read the text content of a Google Doc
+      parameters:
+        - name: doc_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The ID of the Google Doc
+      responses:
+        '200':
+          description: Full document text
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  text:
+                    type: string
+
+  /docs/{doc_id}/write:
+    post:
+      operationId: writeToDoc
+      summary: Insert text into a Google Doc
+      parameters:
+        - name: doc_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The ID of the Google Doc
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                text:
+                  type: string
+                  description: The text to insert at the beginning of the document
+      responses:
+        '200':
+          description: Google Docs API update result
+          content:
+            application/json:
+              schema:
+                type: object
