@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify
 from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 import os
 
@@ -15,34 +16,55 @@ CREDS_FILE = 'credentials.json'
 def get_creds():
     if os.path.exists(TOKEN_FILE):
         creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
-        return creds
     else:
-        # Do NOT prompt on server — just return error response
-        raise RuntimeError("Missing token.json. Please authorize this app locally first.")
+        flow = InstalledAppFlow.from_client_secrets_file(CREDS_FILE, SCOPES)
+        creds = flow.run_local_server(
+            port=8765,
+            access_type='offline',
+            prompt='consent'
+        )
+        with open(TOKEN_FILE, 'w') as token:
+            token.write(creds.to_json())
+    return creds
 
 @app.route('/docs', methods=['GET'])
 def search_doc_by_name():
     title = request.args.get('title')
-    try:
-        creds = get_creds()
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    partial = request.args.get('partial', 'false').lower() == 'true'
 
+    creds = get_creds()
     drive_service = build('drive', 'v3', credentials=creds)
+
+    if partial:
+        q = f"name contains '{title}' and mimeType='application/vnd.google-apps.document'"
+    else:
+        q = f"name = '{title}' and mimeType='application/vnd.google-apps.document'"
+
     results = drive_service.files().list(
-        q=f"name = '{title}' and mimeType='application/vnd.google-apps.document'",
-        fields="files(id, name)", pageSize=1
+        q=q,
+        fields="files(id, name)",
+        pageSize=10
+    ).execute()
+    files = results.get('files', [])
+    return jsonify(files)
+
+@app.route('/docs/all', methods=['GET'])
+def list_all_docs():
+    creds = get_creds()
+    drive_service = build('drive', 'v3', credentials=creds)
+    query = "mimeType='application/vnd.google-apps.document'"
+
+    results = drive_service.files().list(
+        q=query,
+        fields="files(id, name)",
+        pageSize=100
     ).execute()
     files = results.get('files', [])
     return jsonify(files)
 
 @app.route('/docs/<doc_id>', methods=['GET'])
 def read_doc(doc_id):
-    try:
-        creds = get_creds()
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
+    creds = get_creds()
     docs_service = build('docs', 'v1', credentials=creds)
     document = docs_service.documents().get(documentId=doc_id).execute()
 
@@ -61,12 +83,7 @@ def read_doc(doc_id):
 def write_to_doc(doc_id):
     data = request.json
     text = data.get('text', '')
-
-    try:
-        creds = get_creds()
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
+    creds = get_creds()
     docs_service = build('docs', 'v1', credentials=creds)
     requests = [{
         'insertText': {
@@ -78,7 +95,7 @@ def write_to_doc(doc_id):
         documentId=doc_id,
         body={'requests': requests}
     ).execute()
-    return jsonify({"status": "success", "result": result})
+    return jsonify(result)
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
