@@ -1,18 +1,19 @@
 import os
 import json
-from flask import Flask, request, jsonify, redirect, render_template_string
+from flask import Flask, request, jsonify, redirect
 from flask_cors import CORS
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
+from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from google.auth.exceptions import RefreshError
 
-SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
 app = Flask(__name__)
 CORS(app)
 
-TOKEN_FILE = 'token.json'
+SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
 CLIENT_SECRET_FILE = 'client_secret.json'
+TOKEN_FILE = 'token.json'
+REDIRECT_URI = "https://gpt-docs-proxy.onrender.com/oauth2callback"
 
 def save_credentials(creds):
     with open(TOKEN_FILE, 'w') as token:
@@ -29,30 +30,31 @@ def load_credentials():
     return None
 
 @app.route("/")
-def home():
-    return "GPT Docs Proxy is live."
+def index():
+    return "GPT Docs Proxy is running."
 
-@app.route("/authorize", methods=["GET", "POST"])
+@app.route("/authorize")
 def authorize():
-    if request.method == "POST":
-        code = request.form.get("code")
-        flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRET_FILE, SCOPES)
-        flow.fetch_token(code=code)
-        creds = flow.credentials
-        save_credentials(creds)
-        return "Authorization successful. You can now close this tab."
-    else:
-        flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRET_FILE, SCOPES)
-        auth_url, _ = flow.authorization_url(prompt='consent')
-        return render_template_string("""
-            <h2>Step 1: Click the link below to authorize</h2>
-            <a href="{{auth_url}}" target="_blank">Authorize Google Access</a>
-            <h2>Step 2: Paste the authorization code here</h2>
-            <form method="post">
-              <input name="code" type="text" style="width:400px"/>
-              <input type="submit" value="Submit"/>
-            </form>
-        """, auth_url=auth_url)
+    flow = Flow.from_client_secrets_file(
+        CLIENT_SECRET_FILE,
+        scopes=SCOPES,
+        redirect_uri=REDIRECT_URI
+    )
+    auth_url, _ = flow.authorization_url(prompt='consent', include_granted_scopes='true')
+    return redirect(auth_url)
+
+@app.route("/oauth2callback")
+def oauth2callback():
+    flow = Flow.from_client_secrets_file(
+        CLIENT_SECRET_FILE,
+        scopes=SCOPES,
+        redirect_uri=REDIRECT_URI
+    )
+    flow.fetch_token(authorization_response=request.url)
+
+    creds = flow.credentials
+    save_credentials(creds)
+    return "Authorization complete. You may now close this tab."
 
 @app.route("/docs")
 def search_docs():
