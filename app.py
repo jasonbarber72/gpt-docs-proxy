@@ -1,165 +1,126 @@
 import os
-
-# Allow HTTP for local testing (no effect on https deployments)
-os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
-
 import json
-import logging
-from flask import Flask, request, jsonify, redirect, render_template_string
+from flask import Flask, request, redirect, jsonify
 from flask_cors import CORS
-
-from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
+from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
-from google.auth.exceptions import RefreshError
 
-# ——— Flask setup —————————————————————————————————————————
 app = Flask(__name__)
 CORS(app)
-logging.basicConfig(level=logging.INFO)
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", "your-secret-key")
 
-CLIENT_SECRET_FILE = 'client_secret.json'
-TOKEN_FILE = 'token.json'
-REDIRECT_URI = 'https://gpt-docs-proxy.onrender.com/oauth2callback'
-
-# **Exact scopes to match what Google is returning**
 SCOPES = [
-    'https://www.googleapis.com/auth/drive',
-    'https://www.googleapis.com/auth/drive.readonly',
-    'https://www.googleapis.com/auth/documents'
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/drive.readonly",
+    "https://www.googleapis.com/auth/documents",
 ]
+CLIENT_SECRETS_FILE = "client_secret.json"
+TOKEN_FILE = "token.json"
 
-# ——— Helpers ——————————————————————————————————————————————
-def save_credentials(creds: Credentials):
-    with open(TOKEN_FILE, 'w') as f:
-        f.write(creds.to_json())
-    app.logger.info("Credentials saved")
-
-def load_credentials() -> Credentials | None:
-    if not os.path.exists(TOKEN_FILE):
-        return None
-    creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
-    if creds.expired and creds.refresh_token:
-        try:
+def get_credentials():
+    creds = None
+    if os.path.exists(TOKEN_FILE):
+        creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
-            save_credentials(creds)
-            app.logger.info("Credentials refreshed")
-        except RefreshError as e:
-            app.logger.error(f"Refresh failed: {e}")
-            return None
+            with open(TOKEN_FILE, "w") as token:
+                token.write(creds.to_json())
+        else:
+            raise Exception("No valid credentials. Please re-authorize via /authorize.")
     return creds
 
-# ——— Routes ——————————————————————————————————————————————
-@app.route('/')
-def index():
-    return 'GPT Docs Proxy is live.'
+def extract_text(doc):
+    text = ""
+    for element in doc.get("body", {}).get("content", []):
+        if "paragraph" in element:
+            for run in element["paragraph"].get("elements", []):
+                if "textRun" in run and run["textRun"].get("content"):
+                    text += run["textRun"]["content"]
+    return text
 
-@app.route('/authorize')
+@app.route("/authorize")
 def authorize():
-    """
-    Step 1: Redirect to Google's OAuth 2.0 consent screen asking for exactly the three scopes.
-    """
     flow = Flow.from_client_secrets_file(
-        CLIENT_SECRET_FILE,
+        CLIENT_SECRETS_FILE,
         scopes=SCOPES,
-        redirect_uri=REDIRECT_URI
+        redirect_uri=os.environ.get("REDIRECT_URI")
     )
-    auth_url, _ = flow.authorization_url(
-        access_type='offline',
-        include_granted_scopes='true',
-        prompt='consent'
-    )
+    auth_url, _ = flow.authorization_url(prompt="consent", access_type="offline")
     return redirect(auth_url)
 
-@app.route('/oauth2callback')
+@app.route("/oauth2callback")
 def oauth2callback():
-    """
-    Step 2: Google redirects back here with code -> exchange it for tokens matching those scopes.
-    """
-    try:
-        flow = Flow.from_client_secrets_file(
-            CLIENT_SECRET_FILE,
-            scopes=SCOPES,
-            redirect_uri=REDIRECT_URI
-        )
-        flow.fetch_token(authorization_response=request.url)
-        creds = flow.credentials
-        save_credentials(creds)
-        return '✅ Authorization complete. You may now close this tab.'
-    except Exception as e:
-        app.logger.exception("OAuth callback error")
-        return (
-            f"<h2>OAuth Callback Error</h2>"
-            f"<pre>{e}</pre>"
-            f"<p>See Render logs for full details.</p>",
-            500
-        )
+    flow = Flow.from_client_secrets_file(
+        CLIENT_SECRETS_FILE,
+        scopes=SCOPES,
+        redirect_uri=os.environ.get("REDIRECT_URI")
+    )
+    flow.fetch_token(code=request.args.get("code"))
+    creds = flow.credentials
+    with open(TOKEN_FILE, "w") as token:
+        token.write(creds.to_json())
+    return "Authorization complete. You can now close this window."
 
-@app.route('/docs')
-def search_docs():
-    """
-    Search for Google Docs whose title contains ?title=.
-    """
-    creds = load_credentials()
-    if not creds:
-        return jsonify({'error': 'Not authorized'}), 401
-
-    title = request.args.get('title', '')
+@app.route("/docs")
+def search_docs_by_title():
+    title = request.args.get("title", "")
     if not title:
-        return jsonify({'error': 'Missing ?title parameter'}), 400
+        return jsonify([]), 400
+    creds = get_credentials()
+    drive = build("drive", "v3", credentials=creds)
+    query = f"name contains '{title}' and mimeType='application/vnd.google-apps.document'"
+    response = drive.files().list(q=query, fields="files(id,name)").execute()
+    return jsonify(response.get("files", []))
 
-    drive = build('drive', 'v3', credentials=creds)
-    results = drive.files().list(
-        q=(
-            f"mimeType='application/vnd.google-apps.document' "
-            f"and name contains '{title}' and trashed=false"
-        ),
-        pageSize=10,
-        fields="files(id, name)"
-    ).execute()
-
-    return jsonify(results.get('files', []))
-
-@app.route('/docs/all')
+@app.route("/docs/all")
 def list_all_docs():
-    """
-    List all accessible Google Docs.
-    """
-    creds = load_credentials()
-    if not creds:
-        return jsonify({'error': 'Not authorized'}), 401
-
-    drive = build('drive', 'v3', credentials=creds)
-    results = drive.files().list(
-        q="mimeType='application/vnd.google-apps.document' and trashed=false",
-        pageSize=1000,
-        fields="files(id, name)"
+    creds = get_credentials()
+    drive = build("drive", "v3", credentials=creds)
+    response = drive.files().list(
+        q="mimeType='application/vnd.google-apps.document'",
+        fields="files(id,name)"
     ).execute()
+    return jsonify(response.get("files", []))
 
-    return jsonify(results.get('files', []))
+@app.route("/docs/<doc_id>")
+def read_doc_by_id(doc_id):
+    creds = get_credentials()
+    drive = build("drive", "v3", credentials=creds)
+    docs = build("docs", "v1", credentials=creds)
 
-@app.route('/docs/<doc_id>')
-def get_doc_content(doc_id):
-    """
-    Fetch the full text of a single Google Doc by ID.
-    """
-    creds = load_credentials()
-    if not creds:
-        return jsonify({'error': 'Not authorized'}), 401
+    # Fetch name
+    file = drive.files().get(fileId=doc_id, fields="name").execute()
+    name = file.get("name")
 
-    docs = build('docs', 'v1', credentials=creds)
-    document = docs.documents().get(documentId=doc_id).execute()
+    # Fetch and extract text
+    doc = docs.documents().get(documentId=doc_id).execute()
+    text = extract_text(doc)
 
-    # Extract only the text runs
-    text = ''
-    for elem in document.get('body', {}).get('content', []):
-        if 'paragraph' in elem:
-            for run in elem['paragraph'].get('elements', []):
-                text += run.get('textRun', {}).get('content', '')
+    return jsonify({"id": doc_id, "name": name, "text": text})
 
-    return jsonify({'id': doc_id, 'text': text})
+@app.route("/docs/batch", methods=["POST"])
+def batch_read_docs():
+    data = request.get_json() or {}
+    doc_ids = data.get("doc_ids", [])
+    creds = get_credentials()
+    drive = build("drive", "v3", credentials=creds)
+    docs = build("docs", "v1", credentials=creds)
 
-# ——— Main —————————————————————————————————————————————————
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000)))
+    results = []
+    for doc_id in doc_ids:
+        # Fetch name
+        file = drive.files().get(fileId=doc_id, fields="name").execute()
+        name = file.get("name")
+        # Fetch and extract text
+        doc = docs.documents().get(documentId=doc_id).execute()
+        text = extract_text(doc)
+        results.append({"id": doc_id, "name": name, "text": text})
+
+    return jsonify(results)
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)

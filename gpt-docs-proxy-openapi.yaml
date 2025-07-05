@@ -1,25 +1,53 @@
 openapi: 3.1.0
 info:
   title: GPT Google Docs Proxy
-  description: Access, read, and write Google Docs using a Flask-based proxy with OAuth. Designed for GPT Actions.
   version: 1.0.0
 servers:
   - url: https://gpt-docs-proxy.onrender.com
 paths:
+  /authorize:
+    get:
+      operationId: authorize
+      summary: Redirects to Google OAuth consent screen
+
+  /oauth2callback:
+    get:
+      operationId: oauth2callback
+      summary: Google OAuth callback endpoint
+
   /docs:
     get:
       operationId: searchDocsByTitle
-      summary: Search for a Google Doc by title
+      summary: Search Google Docs by partial title
       parameters:
         - name: title
           in: query
           required: true
           schema:
             type: string
-          description: The exact name of the Google Doc to search for
+          description: Title fragment to match
       responses:
         '200':
-          description: A list of matching documents
+          description: List of matching docs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:
+                      type: string
+                    name:
+                      type: string
+
+  /docs/all:
+    get:
+      operationId: listAllDocs
+      summary: List all accessible Google Docs
+      responses:
+        '200':
+          description: List of docs
           content:
             application/json:
               schema:
@@ -35,36 +63,33 @@ paths:
   /docs/{doc_id}:
     get:
       operationId: readDocById
-      summary: Read the text content of a Google Doc
+      summary: Read full text of a Google Doc
       parameters:
         - name: doc_id
           in: path
           required: true
           schema:
             type: string
-          description: The ID of the Google Doc
+          description: The document’s ID
       responses:
         '200':
-          description: Full document text
+          description: Document text
           content:
             application/json:
               schema:
                 type: object
                 properties:
+                  id:
+                    type: string
+                  name:
+                    type: string
                   text:
                     type: string
 
-  /docs/{doc_id}/write:
+  /docs/batch:
     post:
-      operationId: writeToDoc
-      summary: Insert text into a Google Doc
-      parameters:
-        - name: doc_id
-          in: path
-          required: true
-          schema:
-            type: string
-          description: The ID of the Google Doc
+      operationId: batchReadDocs
+      summary: Read multiple Google Docs by ID
       requestBody:
         required: true
         content:
@@ -72,13 +97,23 @@ paths:
             schema:
               type: object
               properties:
-                text:
-                  type: string
-                  description: The text to insert at the beginning of the document
+                doc_ids:
+                  type: array
+                  items:
+                    type: string
       responses:
         '200':
-          description: Google Docs API update result
+          description: List of document texts
           content:
             application/json:
               schema:
-                type: object
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:
+                      type: string
+                    name:
+                      type: string
+                    text:
+                      type: string
