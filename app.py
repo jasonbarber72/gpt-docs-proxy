@@ -72,4 +72,5 @@ def get_doc_content(doc_id):
     return jsonify({"title": doc.get("title"), "content": content})
 
 if __name__ == "__main__":
-    app.run(port=8765)
+    app.run(host="0.0.0.0", port=10000)
+
