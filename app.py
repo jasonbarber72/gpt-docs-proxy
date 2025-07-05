@@ -1,89 +1,94 @@
 import os
 import json
-import flask
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, redirect, render_template_string
 from flask_cors import CORS
-
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
+from google.auth.exceptions import RefreshError
 
+SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
 app = Flask(__name__)
 CORS(app)
 
-# Minimal scope for Drive file read-only access
-SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
-
-CLIENT_SECRET_FILE = 'client_secret.json'
 TOKEN_FILE = 'token.json'
-
-creds = None
-if os.path.exists(TOKEN_FILE):
-    creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+CLIENT_SECRET_FILE = 'client_secret.json'
 
 def save_credentials(creds):
     with open(TOKEN_FILE, 'w') as token:
         token.write(creds.to_json())
 
-@app.route('/')
-def index():
-    return 'GPT Docs Proxy is running.'
+def load_credentials():
+    if os.path.exists(TOKEN_FILE):
+        creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+        try:
+            creds.refresh(build('drive', 'v3', credentials=creds)._http.request)
+        except RefreshError:
+            return None
+        return creds
+    return None
 
-@app.route('/authorize')
+@app.route("/")
+def home():
+    return "GPT Docs Proxy is live."
+
+@app.route("/authorize", methods=["GET", "POST"])
 def authorize():
-    global creds
-    flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRET_FILE, SCOPES)
-    creds = flow.run_local_server(port=8765)
-    save_credentials(creds)
-    return 'Authorization complete. You may now close this tab.'
+    if request.method == "POST":
+        code = request.form.get("code")
+        flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRET_FILE, SCOPES)
+        flow.fetch_token(code=code)
+        creds = flow.credentials
+        save_credentials(creds)
+        return "Authorization successful. You can now close this tab."
+    else:
+        flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRET_FILE, SCOPES)
+        auth_url, _ = flow.authorization_url(prompt='consent')
+        return render_template_string("""
+            <h2>Step 1: Click the link below to authorize</h2>
+            <a href="{{auth_url}}" target="_blank">Authorize Google Access</a>
+            <h2>Step 2: Paste the authorization code here</h2>
+            <form method="post">
+              <input name="code" type="text" style="width:400px"/>
+              <input type="submit" value="Submit"/>
+            </form>
+        """, auth_url=auth_url)
 
-@app.route('/docs')
+@app.route("/docs")
 def search_docs():
-    if not creds or not creds.valid:
-        return jsonify({'error': 'Invalid or missing credentials'}), 401
-
-    query = request.args.get('title', '')
-    if not query:
-        return jsonify({'error': 'Missing required query parameter: title'}), 400
-
+    creds = load_credentials()
+    if not creds:
+        return "Not authorized", 401
     service = build('drive', 'v3', credentials=creds)
+    title = request.args.get('title')
     results = service.files().list(
-        q=f"mimeType='application/vnd.google-apps.document' and name contains '{query}' and trashed=false",
+        q=f"name contains '{title}' and mimeType='application/vnd.google-apps.document'",
         pageSize=10,
         fields="files(id, name)"
     ).execute()
-    items = results.get('files', [])
+    return jsonify(results.get('files', []))
 
-    return jsonify(items)
-
-@app.route('/docs/<doc_id>')
+@app.route("/docs/<doc_id>")
 def get_doc(doc_id):
-    if not creds or not creds.valid:
-        return jsonify({'error': 'Invalid or missing credentials'}), 401
-
+    creds = load_credentials()
+    if not creds:
+        return "Not authorized", 401
     docs_service = build('docs', 'v1', credentials=creds)
-    try:
-        doc = docs_service.documents().get(documentId=doc_id).execute()
-        return jsonify(doc)
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+    doc = docs_service.documents().get(documentId=doc_id).execute()
+    return jsonify(doc)
 
-@app.route('/docs/all')
+@app.route("/docs/all")
 def list_all_docs():
-    if not creds or not creds.valid:
-        return jsonify({'error': 'Invalid or missing credentials'}), 401
+    creds = load_credentials()
+    if not creds:
+        return "Not authorized", 401
+    service = build('drive', 'v3', credentials=creds)
+    results = service.files().list(
+        q="mimeType='application/vnd.google-apps.document'",
+        pageSize=100,
+        fields="files(id, name)"
+    ).execute()
+    return jsonify(results.get('files', []))
 
-    drive_service = build('drive', 'v3', credentials=creds)
-    try:
-        results = drive_service.files().list(
-            q="mimeType='application/vnd.google-apps.document' and trashed=false",
-            pageSize=100,
-            fields="files(id, name)"
-        ).execute()
-        items = results.get('files', [])
-        return jsonify(items)
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=10000)
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=10000)
