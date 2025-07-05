@@ -10,21 +10,21 @@ app = Flask(__name__)
 CORS(app)
 
 SCOPES = [
-    'https://www.googleapis.com/auth/drive',
     'https://www.googleapis.com/auth/documents',
-    'https://www.googleapis.com/auth/drive.file',
+    'https://www.googleapis.com/auth/drive',
 ]
+
 CLIENT_SECRET_FILE = 'client_secret.json'
 TOKEN_FILE = 'token.json'
-
 
 def get_credentials():
     if os.path.exists(TOKEN_FILE):
         with open(TOKEN_FILE, 'r') as token:
             creds_data = json.load(token)
-            return Credentials.from_authorized_user_info(info=creds_data, scopes=SCOPES)
-    return None
-
+            creds = Credentials.from_authorized_user_info(info=creds_data, scopes=SCOPES)
+    else:
+        creds = None
+    return creds
 
 @app.route('/authorize')
 def authorize():
@@ -34,19 +34,16 @@ def authorize():
         token.write(creds.to_json())
     return 'Authorization complete. You may now close this tab.'
 
-
 @app.route('/docs', methods=['GET'])
 def search_docs():
-    title_query = request.args.get('title', '')
+    title = request.args.get('title')
     creds = get_credentials()
     service = build('drive', 'v3', credentials=creds)
     results = service.files().list(
-        q=f"name contains '{title_query}' and mimeType='application/vnd.google-apps.document'",
-        pageSize=10,
-        fields="files(id, name)"
-    ).execute()
-    return jsonify(results.get('files', []))
-
+        q=f"mimeType='application/vnd.google-apps.document' and name contains '{title}'",
+        pageSize=10, fields="files(id, name)").execute()
+    files = results.get('files', [])
+    return jsonify(files)
 
 @app.route('/docs/all', methods=['GET'])
 def list_all_docs():
@@ -54,67 +51,37 @@ def list_all_docs():
     service = build('drive', 'v3', credentials=creds)
     results = service.files().list(
         q="mimeType='application/vnd.google-apps.document'",
-        pageSize=1000,
-        fields="files(id, name)"
-    ).execute()
-    return jsonify(results.get('files', []))
-
+        pageSize=1000, fields="files(id, name)").execute()
+    files = results.get('files', [])
+    return jsonify(files)
 
 @app.route('/docs/<doc_id>', methods=['GET'])
 def read_doc(doc_id):
     creds = get_credentials()
     service = build('docs', 'v1', credentials=creds)
-    doc = service.documents().get(documentId=doc_id).execute()
+    document = service.documents().get(documentId=doc_id).execute()
     text = ''
-    for element in doc.get('body', {}).get('content', []):
+    for element in document.get('body').get('content'):
         if 'paragraph' in element:
-            for p in element['paragraph'].get('elements', []):
-                text += p.get('textRun', {}).get('content', '')
+            for item in element['paragraph'].get('elements', []):
+                text += item.get('textRun', {}).get('content', '')
     return jsonify({'text': text})
 
-
 @app.route('/docs/<doc_id>/write', methods=['POST'])
-def write_to_doc(doc_id):
-    data = request.json
+def write_doc(doc_id):
+    creds = get_credentials()
+    service = build('docs', 'v1', credentials=creds)
+    data = request.get_json()
     text = data.get('text', '')
-    creds = get_credentials()
-    service = build('docs', 'v1', credentials=creds)
-    requests_body = {
-        'requests': [
-            {
-                'insertText': {
-                    'location': {'index': 1},
-                    'text': text
-                }
-            }
-        ]
-    }
-    result = service.documents().batchUpdate(documentId=doc_id, body=requests_body).execute()
-    return jsonify({'status': 'success', 'response': result})
-
-
-@app.route('/docs/batch-read', methods=['POST'])
-def read_multiple_docs():
-    data = request.json
-    doc_ids = data.get('doc_ids', [])
-    creds = get_credentials()
-    service = build('docs', 'v1', credentials=creds)
-    results = []
-
-    for doc_id in doc_ids:
-        try:
-            doc = service.documents().get(documentId=doc_id).execute()
-            text = ''
-            for element in doc.get('body', {}).get('content', []):
-                if 'paragraph' in element:
-                    for p in element['paragraph'].get('elements', []):
-                        text += p.get('textRun', {}).get('content', '')
-            results.append({'id': doc_id, 'text': text})
-        except Exception as e:
-            results.append({'id': doc_id, 'error': str(e)})
-
-    return jsonify(results)
-
+    requests_body = [
+        {'insertText': {
+            'location': {'index': 1},
+            'text': text
+        }}
+    ]
+    result = service.documents().batchUpdate(
+        documentId=doc_id, body={'requests': requests_body}).execute()
+    return jsonify({'status': 'success', 'updates': result})
 
 if __name__ == '__main__':
-    app.run(port=8765)
+    app.run(host='0.0.0.0', port=10000)
