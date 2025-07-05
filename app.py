@@ -1,106 +1,103 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, redirect
 from flask_cors import CORS
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
 import os
 import json
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
 
 app = Flask(__name__)
 CORS(app)
 
 SCOPES = [
     'https://www.googleapis.com/auth/drive',
-    'https://www.googleapis.com/auth/documents'
+    'https://www.googleapis.com/auth/documents',
+    'https://www.googleapis.com/auth/drive.file',
 ]
+CLIENT_SECRET_FILE = 'client_secret.json'
 TOKEN_FILE = 'token.json'
-creds = None
 
-if os.path.exists(TOKEN_FILE):
-    creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+
+def get_credentials():
+    if os.path.exists(TOKEN_FILE):
+        with open(TOKEN_FILE, 'r') as token:
+            creds_data = json.load(token)
+            return Credentials.from_authorized_user_info(info=creds_data, scopes=SCOPES)
+    return None
+
+
+@app.route('/authorize')
+def authorize():
+    flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRET_FILE, SCOPES)
+    creds = flow.run_local_server(port=8765)
+    with open(TOKEN_FILE, 'w') as token:
+        token.write(creds.to_json())
+    return 'Authorization complete. You may now close this tab.'
+
 
 @app.route('/docs', methods=['GET'])
 def search_docs():
-    if not creds or not creds.valid:
-        return jsonify({'error': 'Google credentials missing or invalid'}), 401
-
-    title = request.args.get('title')
-    if not title:
-        return jsonify({'error': 'Missing title parameter'}), 400
-
+    title_query = request.args.get('title', '')
+    creds = get_credentials()
     service = build('drive', 'v3', credentials=creds)
     results = service.files().list(
-        q=f"name contains '{title}' and mimeType='application/vnd.google-apps.document'",
+        q=f"name contains '{title_query}' and mimeType='application/vnd.google-apps.document'",
+        pageSize=10,
         fields="files(id, name)"
     ).execute()
-
     return jsonify(results.get('files', []))
 
-@app.route('/docs/all', methods=['GET'])
-def list_docs():
-    if not creds or not creds.valid:
-        return jsonify({'error': 'Google credentials missing or invalid'}), 401
 
+@app.route('/docs/all', methods=['GET'])
+def list_all_docs():
+    creds = get_credentials()
     service = build('drive', 'v3', credentials=creds)
     results = service.files().list(
         q="mimeType='application/vnd.google-apps.document'",
-        fields="files(id, name)",
-        pageSize=1000
+        pageSize=1000,
+        fields="files(id, name)"
     ).execute()
-
     return jsonify(results.get('files', []))
+
 
 @app.route('/docs/<doc_id>', methods=['GET'])
 def read_doc(doc_id):
-    if not creds or not creds.valid:
-        return jsonify({'error': 'Google credentials missing or invalid'}), 401
-
+    creds = get_credentials()
     service = build('docs', 'v1', credentials=creds)
     doc = service.documents().get(documentId=doc_id).execute()
-
     text = ''
-    for element in doc.get("body", {}).get("content", []):
-        paragraph = element.get("paragraph")
-        if paragraph:
-            for el in paragraph.get("elements", []):
-                text += el.get("textRun", {}).get("content", '')
+    for element in doc.get('body', {}).get('content', []):
+        if 'paragraph' in element:
+            for p in element['paragraph'].get('elements', []):
+                text += p.get('textRun', {}).get('content', '')
+    return jsonify({'text': text})
 
-    return jsonify({'text': text.strip()})
 
 @app.route('/docs/<doc_id>/write', methods=['POST'])
-def write_doc(doc_id):
-    if not creds or not creds.valid:
-        return jsonify({'error': 'Google credentials missing or invalid'}), 401
-
-    text = request.json.get('text')
-    if not text:
-        return jsonify({'error': 'Missing text in request'}), 400
-
+def write_to_doc(doc_id):
+    data = request.json
+    text = data.get('text', '')
+    creds = get_credentials()
     service = build('docs', 'v1', credentials=creds)
-    service.documents().batchUpdate(
-        documentId=doc_id,
-        body={
-            "requests": [
-                {
-                    "insertText": {
-                        "location": {"index": 1},
-                        "text": text + "\n"
-                    }
+    requests_body = {
+        'requests': [
+            {
+                'insertText': {
+                    'location': {'index': 1},
+                    'text': text
                 }
-            ]
-        }
-    ).execute()
+            }
+        ]
+    }
+    result = service.documents().batchUpdate(documentId=doc_id, body=requests_body).execute()
+    return jsonify({'status': 'success', 'response': result})
 
-    return jsonify({'status': 'success'})
 
 @app.route('/docs/batch-read', methods=['POST'])
-def batch_read_docs():
-    if not creds or not creds.valid:
-        return jsonify({'error': 'Google credentials missing or invalid'}), 401
-
-    doc_ids = request.json.get('doc_ids', [])
-    if not doc_ids:
-        return jsonify({'error': 'Missing doc_ids'}), 400
-
+def read_multiple_docs():
+    data = request.json
+    doc_ids = data.get('doc_ids', [])
+    creds = get_credentials()
     service = build('docs', 'v1', credentials=creds)
     results = []
 
@@ -108,16 +105,16 @@ def batch_read_docs():
         try:
             doc = service.documents().get(documentId=doc_id).execute()
             text = ''
-            for element in doc.get("body", {}).get("content", []):
-                paragraph = element.get("paragraph")
-                if paragraph:
-                    for el in paragraph.get("elements", []):
-                        text += el.get("textRun", {}).get("content", '')
-            results.append({"id": doc_id, "text": text.strip()})
+            for element in doc.get('body', {}).get('content', []):
+                if 'paragraph' in element:
+                    for p in element['paragraph'].get('elements', []):
+                        text += p.get('textRun', {}).get('content', '')
+            results.append({'id': doc_id, 'text': text})
         except Exception as e:
-            results.append({"id": doc_id, "text": "", "error": str(e)})
+            results.append({'id': doc_id, 'error': str(e)})
 
     return jsonify(results)
 
+
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=10000)
+    app.run(port=8765)
