@@ -1,18 +1,19 @@
 import os
+
+# ── Allow HTTP (insecure) transport for OAuthlib on this server ─────────────────
+os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
+
 import json
 import logging
-
 from flask import Flask, request, jsonify, redirect, render_template_string
 from flask_cors import CORS
-
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from google.auth.exceptions import RefreshError
 
-# ——— Flask Setup ——————————————————————————————————————————————
-
+# ── Flask App Setup ────────────────────────────────────────────────────────────
 app = Flask(__name__)
 CORS(app)
 logging.basicConfig(level=logging.INFO)
@@ -22,16 +23,13 @@ TOKEN_FILE = 'token.json'
 SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
 REDIRECT_URI = 'https://gpt-docs-proxy.onrender.com/oauth2callback'
 
-# ——— Helpers ——————————————————————————————————————————————
-
+# ── Helper Functions ───────────────────────────────────────────────────────────
 def save_credentials(creds: Credentials):
-    """Persist credentials to TOKEN_FILE."""
     with open(TOKEN_FILE, 'w') as f:
         f.write(creds.to_json())
-    app.logger.info("Credentials saved to token.json")
+    app.logger.info("Saved new credentials to token.json")
 
 def load_credentials() -> Credentials | None:
-    """Load credentials and refresh if needed."""
     if not os.path.exists(TOKEN_FILE):
         return None
     creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
@@ -40,21 +38,22 @@ def load_credentials() -> Credentials | None:
         try:
             creds.refresh(Request())
             save_credentials(creds)
-            app.logger.info("Credentials refreshed")
+            app.logger.info("Refreshed expired credentials")
         except RefreshError as e:
             app.logger.error(f"Failed to refresh credentials: {e}")
             return None
     return creds
 
-# ——— Routes ——————————————————————————————————————————————
-
+# ── Routes ─────────────────────────────────────────────────────────────────────
 @app.route('/')
 def index():
     return 'GPT Docs Proxy is live.'
 
 @app.route('/authorize')
 def authorize():
-    """Step 1: Redirect user to Google for consent."""
+    """
+    Step 1: Redirect the user to Google's OAuth consent screen.
+    """
     flow = Flow.from_client_secrets_file(
         CLIENT_SECRET_FILE,
         scopes=SCOPES,
@@ -69,7 +68,9 @@ def authorize():
 
 @app.route('/oauth2callback')
 def oauth2callback():
-    """Step 2: Handle Google’s response and store tokens."""
+    """
+    Step 2: Google redirects back here with a code; exchange it for tokens.
+    """
     try:
         flow = Flow.from_client_secrets_file(
             CLIENT_SECRET_FILE,
@@ -85,23 +86,25 @@ def oauth2callback():
         return (
             f"<h2>OAuth Callback Error</h2>"
             f"<pre>{e}</pre>"
-            f"<p>Check the Render logs for full traceback.</p>",
+            f"<p>See Render logs for full traceback.</p>",
             500
         )
 
 @app.route('/docs')
 def search_docs():
-    """Search for Google Docs by title fragment."""
+    """
+    Search for Google Docs by partial title.
+    """
     creds = load_credentials()
     if not creds:
         return jsonify({'error': 'Not authorized'}), 401
 
-    title = request.args.get('title')
+    title = request.args.get('title', '')
     if not title:
         return jsonify({'error': 'Missing ?title parameter'}), 400
 
-    service = build('drive', 'v3', credentials=creds)
-    results = service.files().list(
+    drive = build('drive', 'v3', credentials=creds)
+    results = drive.files().list(
         q=(
             f"mimeType='application/vnd.google-apps.document' "
             f"and name contains '{title}' and trashed=false"
@@ -114,13 +117,15 @@ def search_docs():
 
 @app.route('/docs/all')
 def list_all_docs():
-    """List all accessible Google Docs."""
+    """
+    List all accessible Google Docs.
+    """
     creds = load_credentials()
     if not creds:
         return jsonify({'error': 'Not authorized'}), 401
 
-    service = build('drive', 'v3', credentials=creds)
-    results = service.files().list(
+    drive = build('drive', 'v3', credentials=creds)
+    results = drive.files().list(
         q="mimeType='application/vnd.google-apps.document' and trashed=false",
         pageSize=1000,
         fields="files(id, name)"
@@ -130,15 +135,17 @@ def list_all_docs():
 
 @app.route('/docs/<doc_id>')
 def get_doc_content(doc_id):
-    """Fetch the full content of a single Google Doc."""
+    """
+    Return the full text content of a single Google Doc.
+    """
     creds = load_credentials()
     if not creds:
         return jsonify({'error': 'Not authorized'}), 401
 
-    docs_service = build('docs', 'v1', credentials=creds)
-    document = docs_service.documents().get(documentId=doc_id).execute()
+    docs = build('docs', 'v1', credentials=creds)
+    document = docs.documents().get(documentId=doc_id).execute()
 
-    # Extract text only
+    # Extract plain text
     text = ''
     for element in document.get('body', {}).get('content', []):
         if 'paragraph' in element:
@@ -147,8 +154,6 @@ def get_doc_content(doc_id):
 
     return jsonify({'id': doc_id, 'text': text})
 
-# ——— Run Server ——————————————————————————————————————————————
-
+# ── Run on Render ──────────────────────────────────────────────────────────────
 if __name__ == '__main__':
-    # Bind to all interfaces on port 10000 for Render
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000)))
