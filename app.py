@@ -1,35 +1,25 @@
 import os
-import json
-from flask import Flask, request, redirect, jsonify
+from flask import Flask, request, jsonify
 from flask_cors import CORS
-from google_auth_oauthlib.flow import Flow
-from google.oauth2.credentials import Credentials
-from google.auth.transport.requests import Request
+from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
 app = Flask(__name__)
 CORS(app)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "your-secret-key")
 
+SERVICE_ACCOUNT_FILE = "service-account.json"
 SCOPES = [
     "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/drive.readonly",
     "https://www.googleapis.com/auth/documents",
 ]
-CLIENT_SECRETS_FILE = "client_secret.json"
-TOKEN_FILE = "token.json"
 
 def get_credentials():
-    creds = None
-    if os.path.exists(TOKEN_FILE):
-        creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-            with open(TOKEN_FILE, "w") as token:
-                token.write(creds.to_json())
-        else:
-            raise Exception("No valid credentials. Please re-authorize via /authorize.")
+    creds = service_account.Credentials.from_service_account_file(
+        SERVICE_ACCOUNT_FILE,
+        scopes=SCOPES
+    )
     return creds
 
 def extract_text(doc):
@@ -40,29 +30,6 @@ def extract_text(doc):
                 if "textRun" in run and run["textRun"].get("content"):
                     text += run["textRun"]["content"]
     return text
-
-@app.route("/authorize")
-def authorize():
-    flow = Flow.from_client_secrets_file(
-        CLIENT_SECRETS_FILE,
-        scopes=SCOPES,
-        redirect_uri=os.environ.get("REDIRECT_URI")
-    )
-    auth_url, _ = flow.authorization_url(prompt="consent", access_type="offline")
-    return redirect(auth_url)
-
-@app.route("/oauth2callback")
-def oauth2callback():
-    flow = Flow.from_client_secrets_file(
-        CLIENT_SECRETS_FILE,
-        scopes=SCOPES,
-        redirect_uri=os.environ.get("REDIRECT_URI")
-    )
-    flow.fetch_token(code=request.args.get("code"))
-    creds = flow.credentials
-    with open(TOKEN_FILE, "w") as token:
-        token.write(creds.to_json())
-    return "Authorization complete. You can now close this window."
 
 @app.route("/docs")
 def search_docs_by_title():
@@ -91,11 +58,8 @@ def read_doc_by_id(doc_id):
     drive = build("drive", "v3", credentials=creds)
     docs = build("docs", "v1", credentials=creds)
 
-    # Fetch name
     file = drive.files().get(fileId=doc_id, fields="name").execute()
     name = file.get("name")
-
-    # Fetch and extract text
     doc = docs.documents().get(documentId=doc_id).execute()
     text = extract_text(doc)
 
@@ -111,10 +75,8 @@ def batch_read_docs():
 
     results = []
     for doc_id in doc_ids:
-        # Fetch name
         file = drive.files().get(fileId=doc_id, fields="name").execute()
         name = file.get("name")
-        # Fetch and extract text
         doc = docs.documents().get(documentId=doc_id).execute()
         text = extract_text(doc)
         results.append({"id": doc_id, "name": name, "text": text})
