@@ -18,10 +18,12 @@ SCOPES = [
 
 ENCODER = tiktoken.get_encoding("cl100k_base")
 
+
 def get_credentials():
     return service_account.Credentials.from_service_account_file(
         SERVICE_ACCOUNT_FILE, scopes=SCOPES
     )
+
 
 def extract_text(doc):
     text = ""
@@ -31,6 +33,7 @@ def extract_text(doc):
                 if "textRun" in run and run["textRun"].get("content"):
                     text += run["textRun"]["content"]
     return text
+
 
 @app.route("/docs")
 def search_docs_by_title():
@@ -43,6 +46,7 @@ def search_docs_by_title():
     response = drive.files().list(q=query, fields="files(id,name)").execute()
     return jsonify(response.get("files", []))
 
+
 @app.route("/docs/all")
 def list_all_docs():
     creds = get_credentials()
@@ -52,6 +56,7 @@ def list_all_docs():
         fields="files(id,name)"
     ).execute()
     return jsonify(response.get("files", []))
+
 
 @app.route("/docs/<doc_id>")
 def read_doc_by_id(doc_id):
@@ -72,6 +77,7 @@ def read_doc_by_id(doc_id):
         "token_count": token_count
     })
 
+
 @app.route("/docs/batch", methods=["POST"])
 def batch_read_docs():
     """
@@ -84,9 +90,8 @@ def batch_read_docs():
     docs_service = build("docs", "v1", credentials=creds)
 
     results = []
-    max_chunk_size = 3  # change if you need smaller/larger chunks
+    max_chunk_size = 3  # adjust if needed
 
-    # Process in chunks
     for i in range(0, len(doc_ids), max_chunk_size):
         chunk = doc_ids[i : i + max_chunk_size]
         for doc_id in chunk:
@@ -106,10 +111,11 @@ def batch_read_docs():
 
     return jsonify(results)
 
+
 @app.route("/docs/<doc_id>/page")
 def read_doc_page(doc_id):
     start = int(request.args.get("start_par", 0))
-    end   = int(request.args.get("end_par", start + 50))
+    end = int(request.args.get("end_par", start + 50))
     creds = get_credentials()
     docs_service = build("docs", "v1", credentials=creds)
     doc = docs_service.documents().get(documentId=doc_id).execute()
@@ -120,7 +126,7 @@ def read_doc_page(doc_id):
         for run in p["paragraph"].get("elements", [])
         if "textRun" in run
     )
-    char_count  = len(text)
+    char_count = len(text)
     token_count = len(ENCODER.encode(text))
     return jsonify({
         "id": doc_id,
@@ -131,32 +137,39 @@ def read_doc_page(doc_id):
         "next_start": end
     })
 
+
 @app.route("/docs/metadata")
 def list_docs_metadata():
+    """
+    Returns metadata (id, name, char_count, token_count) for all student lesson-note docs.
+    Filters to only Google Docs whose names contain ' - Violin Practice'.
+    """
     creds = get_credentials()
     drive = build("drive", "v3", credentials=creds)
     docs_service = build("docs", "v1", credentials=creds)
 
+    # List only student lesson-note docs
     response = drive.files().list(
-        q="mimeType='application/vnd.google-apps.document'",
+        q="mimeType='application/vnd.google-apps.document' and name contains ' - Violin Practice'",
         fields="files(id,name)"
     ).execute()
     files = response.get("files", [])
 
     metadata = []
     for f in files:
-        doc_id    = f.get("id")
-        file_name = f.get("name")
-        doc       = docs_service.documents().get(documentId=doc_id).execute()
-        text      = extract_text(doc)
+        doc_id = f.get("id")
+        name = f.get("name")
+        doc = docs_service.documents().get(documentId=doc_id).execute()
+        text = extract_text(doc)
         metadata.append({
             "id": doc_id,
-            "name": file_name,
+            "name": name,
             "char_count": len(text),
             "token_count": len(ENCODER.encode(text))
         })
 
     return jsonify(metadata)
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
