@@ -3,6 +3,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+import tiktoken
 
 app = Flask(__name__)
 CORS(app)
@@ -15,12 +16,13 @@ SCOPES = [
     "https://www.googleapis.com/auth/documents",
 ]
 
+# Prepare the tokenizer once
+ENCODER = tiktoken.get_encoding("cl100k_base")
+
 def get_credentials():
-    creds = service_account.Credentials.from_service_account_file(
-        SERVICE_ACCOUNT_FILE,
-        scopes=SCOPES
+    return service_account.Credentials.from_service_account_file(
+        SERVICE_ACCOUNT_FILE, scopes=SCOPES
     )
-    return creds
 
 def extract_text(doc):
     text = ""
@@ -60,10 +62,20 @@ def read_doc_by_id(doc_id):
 
     file = drive.files().get(fileId=doc_id, fields="name").execute()
     name = file.get("name")
+
     doc = docs.documents().get(documentId=doc_id).execute()
     text = extract_text(doc)
 
-    return jsonify({"id": doc_id, "name": name, "text": text})
+    char_count = len(text)
+    token_count = len(ENCODER.encode(text))
+
+    return jsonify({
+        "id": doc_id,
+        "name": name,
+        "text": text,
+        "char_count": char_count,
+        "token_count": token_count
+    })
 
 @app.route("/docs/batch", methods=["POST"])
 def batch_read_docs():
@@ -79,7 +91,15 @@ def batch_read_docs():
         name = file.get("name")
         doc = docs.documents().get(documentId=doc_id).execute()
         text = extract_text(doc)
-        results.append({"id": doc_id, "name": name, "text": text})
+        char_count = len(text)
+        token_count = len(ENCODER.encode(text))
+        results.append({
+            "id": doc_id,
+            "name": name,
+            "text": text,
+            "char_count": char_count,
+            "token_count": token_count
+        })
 
     return jsonify(results)
 
