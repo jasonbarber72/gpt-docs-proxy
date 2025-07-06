@@ -74,26 +74,36 @@ def read_doc_by_id(doc_id):
 
 @app.route("/docs/batch", methods=["POST"])
 def batch_read_docs():
+    """
+    Read multiple docs; automatically splits into chunks of 3 to avoid payload-too-large.
+    """
     data = request.get_json() or {}
     doc_ids = data.get("doc_ids", [])
     creds = get_credentials()
     drive = build("drive", "v3", credentials=creds)
     docs_service = build("docs", "v1", credentials=creds)
+
     results = []
-    for doc_id in doc_ids:
-        file = drive.files().get(fileId=doc_id, fields="name").execute()
-        name = file.get("name")
-        doc = docs_service.documents().get(documentId=doc_id).execute()
-        text = extract_text(doc)
-        char_count = len(text)
-        token_count = len(ENCODER.encode(text))
-        results.append({
-            "id": doc_id,
-            "name": name,
-            "text": text,
-            "char_count": char_count,
-            "token_count": token_count
-        })
+    max_chunk_size = 3  # change if you need smaller/larger chunks
+
+    # Process in chunks
+    for i in range(0, len(doc_ids), max_chunk_size):
+        chunk = doc_ids[i : i + max_chunk_size]
+        for doc_id in chunk:
+            file = drive.files().get(fileId=doc_id, fields="name").execute()
+            name = file.get("name")
+            doc = docs_service.documents().get(documentId=doc_id).execute()
+            text = extract_text(doc)
+            char_count = len(text)
+            token_count = len(ENCODER.encode(text))
+            results.append({
+                "id": doc_id,
+                "name": name,
+                "text": text,
+                "char_count": char_count,
+                "token_count": token_count
+            })
+
     return jsonify(results)
 
 @app.route("/docs/<doc_id>/page")
@@ -121,42 +131,29 @@ def read_doc_page(doc_id):
         "next_start": end
     })
 
-# ─── NEW METADATA ENDPOINT ─────────────────────────────────────────────────────
-
 @app.route("/docs/metadata")
 def list_docs_metadata():
-    """
-    Returns a list of all Google Docs in Drive, with only:
-      - id
-      - name
-      - char_count
-      - token_count
-    """
     creds = get_credentials()
     drive = build("drive", "v3", credentials=creds)
     docs_service = build("docs", "v1", credentials=creds)
 
-    # 1) List all docs
     response = drive.files().list(
         q="mimeType='application/vnd.google-apps.document'",
         fields="files(id,name)"
     ).execute()
     files = response.get("files", [])
 
-    # 2) Build metadata only
     metadata = []
     for f in files:
-        doc_id   = f.get("id")
+        doc_id    = f.get("id")
         file_name = f.get("name")
         doc       = docs_service.documents().get(documentId=doc_id).execute()
         text      = extract_text(doc)
-        char_count  = len(text)
-        token_count = len(ENCODER.encode(text))
         metadata.append({
             "id": doc_id,
             "name": file_name,
-            "char_count": char_count,
-            "token_count": token_count
+            "char_count": len(text),
+            "token_count": len(ENCODER.encode(text))
         })
 
     return jsonify(metadata)
