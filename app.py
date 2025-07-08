@@ -236,66 +236,14 @@ def search_content():
         })
     return jsonify(res)
 
-@app.route("/docs/update_index_json", methods=["POST"])
-def update_index_json():
-    data = request.get_json()
-    student = data.get("student", "").strip()
-    doc_id = data.get("doc_id", "").strip()
-    file_id = data.get("index_file_id", "").strip()
-
-    if not student or not doc_id:
-        return jsonify({"error": "Missing student or doc_id"}), 400
-
-    doc = DOCS.documents().get(documentId=doc_id).execute()
-    text = extract_text(doc)
-    lessons = parse_lessons(text)
-
-    index = []
-    for L in lessons:
-        lines = L.splitlines()
-        if len(lines) < 2: continue
-        heading = lines[0].strip()
-        summary = lines[1].strip()
-        keywords = list(set(
-            w.strip(",.?!").lower()
-            for line in lines[1:]
-            for w in line.strip().split()
-            if len(w) > 3
-        ))
-        index.append({"date": heading, "summary": summary, "keywords": keywords})
-
-    json_data = json.dumps(index, indent=2).encode("utf-8")
-
-    if file_id:
-        DRIVE.files().update(fileId=file_id, media_body=None).execute()
-        DRIVE.files().update_media(fileId=file_id, media_body=json_data).execute()
-    else:
-        upload = DRIVE.files().create(
-            media_body={"body": json_data},
-            body={
-                "name": f"{student} Lesson Index.json",
-                "mimeType": "application/json"
-            },
-            fields="id"
-        ).execute()
-        file_id = upload["id"]
-
-    return jsonify({
-        "status": "ok",
-        "student": student,
-        "doc_id": doc_id,
-        "index_file_id": file_id,
-        "entry_count": len(index)
-    })
-
-@app.route("/docs/read_index_json")
+@app.route("/docs/index/read")
 def read_index_json():
     file_id = request.args.get("file_id", "").strip()
     if not file_id:
         return jsonify({"error": "Missing file_id"}), 400
     try:
-        content = DRIVE.files().get_media(fileId=file_id).execute()
-        text = content.decode("utf-8")
+        file = DRIVE.files().get_media(fileId=file_id).execute()
+        text = file.decode("utf-8")
         return jsonify(json.loads(text))
     except Exception as e:
         return jsonify({"error": str(e)}), 500
