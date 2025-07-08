@@ -1,85 +1,96 @@
 # app.py
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import List
+
+import os
+import json
 import requests
 from functools import lru_cache
+from typing import List
+import faiss
+import numpy as np
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from openai import OpenAI
+from openai.embeddings_utils import get_embedding
 
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.embeddings.openai import OpenAIEmbeddings
-from langchain.vectorstores.faiss import FAISS
+# ─── Configuration ────────────────────────────────────────────────────────────
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    raise RuntimeError("Environment variable OPENAI_API_KEY is required")
+openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
-app = FastAPI()
-
-# Allow all CORS (needed for ChatGPT plugin)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+app = FastAPI(
+    title="gpt-docs-proxy",
+    version="1.0",
+    description="Search student violin lesson notes via embeddings + FAISS"
 )
 
+# ─── Request / Response Models ─────────────────────────────────────────────────
+class SearchRequest(BaseModel):
+    student: str
+    query: str
+    n: int = 5
 
-@lru_cache()
-def build_or_load_charlotte_index():
-    """
-    Fetches the raw index JSON for Charlotte,
-    splits into chunks, embeds with OpenAI,
-    and builds a local FAISS index. Cached on first call.
-    """
-    resp = requests.get(
-        "https://gpt-docs-proxy.onrender.com/docs/index/read"
-        "?file_id=1usQGAus2F361i8IcNDy9FVdCV4t-ePtb"
-    )
-    if resp.status_code != 200:
-        raise RuntimeError(f"Failed to fetch index: {resp.status_code}")
-    items = resp.json()
-    texts = [item["text"] for item in items]
-
-    splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
-    docs = splitter.create_documents(texts)
-
-    embeddings = OpenAIEmbeddings()
-    vector_store = FAISS.from_documents(docs, embeddings)
-    return vector_store
-
-
-class SearchResponse(BaseModel):
+class SearchResult(BaseModel):
     text: str
     score: float
 
+# ─── Health Check ─────────────────────────────────────────────────────────────
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
 
-@app.get("/docs/search_content", response_model=List[SearchResponse])
-def search_content(
-    student: str = Query(..., description="Student name, e.g. Charlotte"),
-    query: str = Query(..., description="Search query"),
-    n: int = Query(5, description="Number of results"),
-):
-    """
-    Search the FAISS index for the given student.
-    Currently only 'Charlotte' is supported.
-    """
-    if student.lower() == "charlotte":
-        index = build_or_load_charlotte_index()
-    else:
-        raise HTTPException(404, f"No index for student '{student}'")
+# ─── Search Endpoint ──────────────────────────────────────────────────────────
+@app.post("/search", response_model=List[SearchResult])
+async def search(req: SearchRequest):
+    try:
+        index, docs = _get_vector_index(req.student)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-    results = index.similarity_search_with_score(query, k=n)
-    return [
-        SearchResponse(text=doc.page_content, score=score)
-        for doc, score in results
-    ]
+    query_emb = get_embedding(
+        req.query,
+        engine="text-embedding-ada-002",
+        api_key=OPENAI_API_KEY
+    )
+    qv = np.array(query_emb, dtype="float32").reshape(1, -1)
 
+    D, I = index.search(qv, req.n)
+    results = []
+    for dist, idx in zip(D[0], I[0]):
+        if 0 <= idx < len(docs):
+            results.append(SearchResult(text=docs[idx], score=float(dist)))
+    return results
 
-@app.on_event("startup")
-def on_startup():
-    # Pre-load Charlotte’s index so the first request is fast
-    build_or_load_charlotte_index()
+# ─── Caching & Index Building ─────────────────────────────────────────────────
+@lru_cache(maxsize=10)
+def _get_vector_index(student: str):
+    file_id = _student_to_file_id(student)
+    idx_url = f"https://gpt-docs-proxy.onrender.com/docs/index/read?file_id={file_id}"
+    r = requests.get(idx_url, timeout=10)
+    r.raise_for_status()
+    index_json = r.json()
+    docs = [chunk["text"] for chunk in index_json]
 
+    embs = [get_embedding(text, engine="text-embedding-ada-002", api_key=OPENAI_API_KEY)
+            for text in docs]
+    embs = np.array(embs, dtype="float32")
 
-# Optional: local test runner
+    dim = embs.shape[1]
+    index = faiss.IndexFlatL2(dim)
+    index.add(embs)
+    return index, docs
+
+def _student_to_file_id(student: str) -> str:
+    mapping = {
+        "Charlotte": "1usQGAus2F361i8IcNDy9FVdCV4t-ePtb",
+        "Leo":        "1bcdEFghIjklMnopQRsTuvWXyZ123456"
+    }
+    if student not in mapping:
+        raise KeyError(f"No index file configured for student '{student}'")
+    return mapping[student]
+
 if __name__ == "__main__":
     import uvicorn
-
-    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("app:app", host="0.0.0.0", port=int(os.getenv("PORT", 8000)), reload=True)
