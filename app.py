@@ -1,10 +1,9 @@
-import os, re, io, json
+import os, re, json
 from datetime import datetime
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 import tiktoken
 
 app = Flask(__name__)
@@ -16,7 +15,6 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/drive.readonly",
     "https://www.googleapis.com/auth/documents",
-    "https://www.googleapis.com/auth/drive.file"
 ]
 ENCODER = tiktoken.get_encoding("cl100k_base")
 DATE_HEADING_RE = re.compile(r"^[A-Za-z]{3,9} \d{1,2} [A-Za-z]{3,9} \d{2}$")
@@ -33,7 +31,7 @@ def init_clients():
     global DRIVE, DOCS
     creds = get_credentials()
     DRIVE = build("drive", "v3", credentials=creds)
-    DOCS  = build("docs", "v1", credentials=creds)
+    DOCS  = build("docs",  "v1", credentials=creds)
 
 def extract_text(doc):
     text = ""
@@ -243,99 +241,65 @@ def update_index_json():
     data = request.get_json()
     student = data.get("student", "").strip()
     doc_id = data.get("doc_id", "").strip()
-    index_file_id = data.get("index_file_id", "").strip()
+    file_id = data.get("index_file_id", "").strip()
 
-    if not (student and doc_id):
-        return jsonify({"error": "Missing required fields"}), 400
+    if not student or not doc_id:
+        return jsonify({"error": "Missing student or doc_id"}), 400
 
-    try:
-        doc = DOCS.documents().get(documentId=doc_id).execute()
-        raw_text = extract_text(doc)
-    except Exception as e:
-        return jsonify({"error": f"Failed to load lesson doc: {str(e)}"}), 500
+    doc = DOCS.documents().get(documentId=doc_id).execute()
+    text = extract_text(doc)
+    lessons = parse_lessons(text)
 
-    def parse_lesson_blocks(text):
-        lines = text.splitlines()
-        blocks, current = [], []
-        for line in lines:
-            if re.match(r"^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d{1,2} \w{3,9} \d{2}$", line.strip()):
-                if current:
-                    blocks.append(current)
-                current = [line.strip()]
-            elif current is not None:
-                current.append(line.strip())
-        if current:
-            blocks.append(current)
-        return blocks
+    index = []
+    for L in lessons:
+        lines = L.splitlines()
+        if len(lines) < 2: continue
+        heading = lines[0].strip()
+        summary = lines[1].strip()
+        keywords = list(set(
+            w.strip(",.?!").lower()
+            for line in lines[1:]
+            for w in line.strip().split()
+            if len(w) > 3
+        ))
+        index.append({"date": heading, "summary": summary, "keywords": keywords})
 
-    def extract_keywords(block):
-        keywords = set()
-        for line in block:
-            parts = re.split(r"[•\-–—:\.,\(\)\[\]\s]+", line)
-            for word in parts:
-                w = word.strip().lower()
-                if len(w) >= 3:
-                    keywords.add(w)
-        return sorted(keywords)
+    json_data = json.dumps(index, indent=2).encode("utf-8")
 
-    lessons = []
-    for block in parse_lesson_blocks(raw_text):
-        date_line = block[0]
-        try:
-            date_obj = datetime.strptime(date_line, "%a %d %b %y")
-            date_str = date_obj.date().isoformat()
-        except:
-            continue
-        keywords = extract_keywords(block)
-        lessons.append({
-            "date": date_str,
-            "keywords": keywords
-        })
-
-    existing_index = []
-    if index_file_id:
-        try:
-            request_drive = DRIVE.files().get_media(fileId=index_file_id)
-            fh = io.BytesIO()
-            downloader = MediaIoBaseDownload(fh, request_drive)
-            done = False
-            while not done:
-                _, done = downloader.next_chunk()
-            fh.seek(0)
-            existing_index = json.load(fh).get("index", [])
-        except Exception as e:
-            print(f"Warning: Could not load existing index: {e}")
-
-    merged = {
-        "student": student,
-        "index": lessons
-    }
-
-    index_text = json.dumps(merged, indent=2)
-    media = MediaIoBaseUpload(io.BytesIO(index_text.encode()), mimetype="application/json")
-
-    if index_file_id:
-        updated = DRIVE.files().update(
-            fileId=index_file_id,
-            media_body=media
-        ).execute()
+    if file_id:
+        DRIVE.files().update(fileId=file_id, media_body=None).execute()
+        DRIVE.files().update_media(fileId=file_id, media_body=json_data).execute()
     else:
-        updated = DRIVE.files().create(
+        upload = DRIVE.files().create(
+            media_body={"body": json_data},
             body={
-                "name": f"lesson-index-{student.lower().replace(' ', '_')}.json",
+                "name": f"{student} Lesson Index.json",
                 "mimeType": "application/json"
             },
-            media_body=media
+            fields="id"
         ).execute()
+        file_id = upload["id"]
 
     return jsonify({
-        "status": "updated",
+        "status": "ok",
         "student": student,
         "doc_id": doc_id,
-        "index_file_id": updated["id"],
-        "entry_count": len(lessons)
+        "index_file_id": file_id,
+        "entry_count": len(index)
     })
 
+@app.route("/docs/read_index_json")
+def read_index_json():
+    file_id = request.args.get("file_id", "").strip()
+    if not file_id:
+        return jsonify({"error": "Missing file_id"}), 400
+    try:
+        content = DRIVE.files().get_media(fileId=file_id).execute()
+        text = content.decode("utf-8")
+        return jsonify(json.loads(text))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 if __name__ == "__main__":
-    port=int(os.environ.get("PORT",10000))
-    app.run(host="0.0.0.0",port=port)
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
