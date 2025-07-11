@@ -1,1 +1,18 @@
-.gitattributes
+# Virtual env
+venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Env files
+*.env
+
+# Credentials
+service-account.json
+credentials.json
+client_secret*.json
+
+# OS files
+.DS_Store
+Thumbs.db
