@@ -1,42 +1,57 @@
-# Filename: app.py
-
 import os
 import requests
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import Any, List, Dict
 
-# ─── App Initialization ───────────────────────────────────────────────────────
-app = FastAPI(
-    title="gpt-docs-proxy",
-    version="1.0",
-    description="Proxy for fetching and searching Google Docs–based lesson notes"
+DOCS_SERVICE_URL = os.getenv(
+    "DOCS_SERVICE_URL",
+    "https://gpt-docs-proxy.onrender.com"
 )
 
-# ─── Health Check ─────────────────────────────────────────────────────────────
+app = FastAPI(
+    title="My Teaching (Basic) Proxy",
+    version="0.1.0"
+)
+
 @app.get("/health")
-async def health():
+def health():
     return {"status": "ok"}
 
-# ─── Search Endpoint (proxy to /docs/search_content) ─────────────────────────
+@app.get("/docs/all")
+def list_all_docs():
+    try:
+        resp = requests.get(f"{DOCS_SERVICE_URL}/docs/all")
+        resp.raise_for_status()
+        return resp.json()
+    except requests.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"Docs service error: {e}")
+
+@app.get("/docs/read")
+def read_doc(file_id: str):
+    try:
+        resp = requests.get(
+            f"{DOCS_SERVICE_URL}/docs/read",
+            params={"file_id": file_id}
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except requests.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"Docs service error: {e}")
+
 class SearchRequest(BaseModel):
     student: str
     query: str
-    n: int = 5
+    n: int = 3
 
 @app.post("/search")
-async def search(req: SearchRequest) -> List[Dict[str, Any]]:
-    """
-    Proxy semantic searches to the remote /docs/search_content endpoint.
-    """
-    url = "https://gpt-docs-proxy.onrender.com/docs/search_content"
+def search_content(req: SearchRequest):
     try:
+        # ← changed to GET with query-params, because upstream only exposes GET /docs/search_content
         resp = requests.get(
-            url,
-            params={"student": req.student, "query": req.query, "n": req.n},
-            timeout=10
+            f"{DOCS_SERVICE_URL}/docs/search_content",
+            params=req.dict()
         )
         resp.raise_for_status()
+        return resp.json()
     except requests.RequestException as e:
         raise HTTPException(status_code=502, detail=f"Docs service error: {e}")
-    return resp.json()
