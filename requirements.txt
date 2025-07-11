@@ -10,7 +10,7 @@ openai==0.27.10
 
 # Indexing & Analytics dependencies
 faiss-cpu==1.7.4
-numpy>=1.25.2
+numpy==1.25.2           # Pin to <2.0 for faiss compatibility
 matplotlib>=3.10.3
 plotly>=6.2.0
 scipy>=1.15.3
