@@ -5,7 +5,7 @@ from pydantic import BaseModel
 
 DOCS_SERVICE_URL = os.getenv(
     "DOCS_SERVICE_URL",
-    "https://gpt-docs-proxy.onrender.com"
+    "https://gpt-docs-basic.onrender.com"
 )
 
 app = FastAPI(
@@ -46,7 +46,7 @@ class SearchRequest(BaseModel):
 @app.post("/search")
 def search_content(req: SearchRequest):
     try:
-        # ← changed to GET with query-params, because upstream only exposes GET /docs/search_content
+        # pointing at GET /docs/search_content on the basic service
         resp = requests.get(
             f"{DOCS_SERVICE_URL}/docs/search_content",
             params=req.dict()
