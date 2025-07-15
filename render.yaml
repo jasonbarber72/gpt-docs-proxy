@@ -1,8 +1,16 @@
-services:
+﻿services:
   - type: web
     name: gpt-docs-proxy
     env: python
-    runtime: python-3.10.13
-    buildCommand: |
-      pip install --upgrade pip setuptools wheel && pip install -r requirements.txt
-    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: DOCS_SERVICE_URL
+        fromService: basic-service
+      - key: OPENAI_API_KEY
+        fromSecret: OPENAI_API_KEY
+    buildCommand: pip install --upgrade pip setuptools wheel && pip install -r requirements.txt && pip install openai faiss-cpu numpy
+    startCommand: uvicorn app:app --host 0.0.0.0 --port 10000
+    routes:
+      - type: http
+        source: /
+        target: 10000
+    plan: free
