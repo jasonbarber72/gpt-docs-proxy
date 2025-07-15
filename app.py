@@ -16,7 +16,7 @@ class SearchRequest(BaseModel):
 
 @app.get("/health")
 def health():
-    return {"status":"ok"}
+    return {"status": "ok"}
 
 @app.get("/docs/all")
 def list_all_docs():
@@ -39,8 +39,13 @@ def read_doc(file_id: str = Query(..., alias="file_id")):
 @app.post("/search")
 def search(req: SearchRequest):
     try:
-        resp = requests.get(f"{DOCS_SERVICE_URL}/docs/search_content", params=req.dict())
+        # Forward as POST to the Basic service's /search endpoint
+        resp = requests.post(
+            f"{DOCS_SERVICE_URL}/search",
+            json=req.dict(),
+            headers={"Content-Type": "application/json"}
+        )
         resp.raise_for_status()
         return resp.json()
     except requests.RequestException as e:
-        raise HTTPException(status_code=502, detail=f"Docs service error: {e}")
+        raise HTTPException(status_code=502, detail=f"Search proxy error: {e}")
