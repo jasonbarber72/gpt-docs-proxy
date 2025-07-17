@@ -9,6 +9,8 @@ from flask import Flask, request, jsonify
 
 # Google API imports
 from google.oauth2 import service_account
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from dotenv import load_dotenv
 
@@ -27,6 +29,12 @@ logger = logging.getLogger(__name__)
 # Configuration
 SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "service-account.json")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+# OAuth credentials
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET") 
+GOOGLE_REFRESH_TOKEN = os.getenv("GOOGLE_REFRESH_TOKEN")
+
 SCOPES = [
     "https://www.googleapis.com/auth/documents.readonly",
     "https://www.googleapis.com/auth/drive.metadata.readonly"
@@ -37,38 +45,68 @@ docs_service = None
 drive_service = None
 
 def initialize_google_services():
-    """Initialize Google API services - called on first use"""
+    """Initialize Google API services with OAuth authentication"""
     global docs_service, drive_service
     
     if docs_service is not None:
         return
     
-    try:
-        if os.path.exists(SERVICE_ACCOUNT_FILE):
-            creds = service_account.Credentials.from_service_account_file(
-                SERVICE_ACCOUNT_FILE, scopes=SCOPES
+    creds = None
+    
+    # Debug environment variables - v3
+    logger.info(f"OAuth credentials present: CLIENT_ID={bool(GOOGLE_CLIENT_ID)}, CLIENT_SECRET={bool(GOOGLE_CLIENT_SECRET)}, REFRESH_TOKEN={bool(GOOGLE_REFRESH_TOKEN)}")
+    
+    # Try OAuth first if we have the credentials
+    if GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and GOOGLE_REFRESH_TOKEN:
+        try:
+            logger.info("Using OAuth authentication")
+            creds = Credentials(
+                token=None,
+                refresh_token=GOOGLE_REFRESH_TOKEN,
+                token_uri='https://accounts.google.com/o/oauth2/token',
+                client_id=GOOGLE_CLIENT_ID,
+                client_secret=GOOGLE_CLIENT_SECRET
             )
-        else:
-            # Try to load from environment variable (for Render deployment)
-            service_account_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
-            if service_account_json:
-                try:
-                    service_account_info = json.loads(service_account_json)
-                    creds = service_account.Credentials.from_service_account_info(
-                        service_account_info, scopes=SCOPES
-                    )
-                except json.JSONDecodeError:
-                    logger.error("Invalid JSON in GOOGLE_SERVICE_ACCOUNT_JSON")
-                    return
+            creds.refresh(Request())
+            logger.info("OAuth token refreshed successfully")
+        except Exception as e:
+            logger.error(f"OAuth authentication failed: {e}")
+            creds = None
+    
+    # Fallback to service account if OAuth fails
+    if not creds:
+        try:
+            if os.path.exists(SERVICE_ACCOUNT_FILE):
+                logger.info("Using service account from file")
+                creds = service_account.Credentials.from_service_account_file(
+                    SERVICE_ACCOUNT_FILE, scopes=SCOPES
+                )
             else:
-                logger.error("No Google service account credentials found")
-                return
-        
+                # Try to load from environment variable (for Render deployment)
+                service_account_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+                if service_account_json:
+                    try:
+                        logger.info("Using service account from environment")
+                        service_account_info = json.loads(service_account_json)
+                        creds = service_account.Credentials.from_service_account_info(
+                            service_account_info, scopes=SCOPES
+                        )
+                    except json.JSONDecodeError:
+                        logger.error("Invalid JSON in GOOGLE_SERVICE_ACCOUNT_JSON")
+                        return
+                else:
+                    logger.error("No Google credentials found")
+                    return
+        except Exception as e:
+            logger.error(f"Service account authentication failed: {e}")
+            return
+    
+    try:
         docs_service = build("docs", "v1", credentials=creds)
         drive_service = build("drive", "v3", credentials=creds)
         logger.info("Google API services initialized successfully")
     except Exception as e:
-        logger.error(f"Failed to initialize Google API: {e}")
+        logger.error(f"Failed to initialize Google API services: {e}")
         docs_service = None
         drive_service = None
 
@@ -114,151 +152,162 @@ def extract_student_name(filename: str) -> Optional[str]:
     
     return filename.split(' - ')[0].strip() if ' - ' in filename else filename.strip()
 
-def get_document_text(file_id: str, max_paragraphs: int = None, stop_at_date: str = None) -> str:
-    """Get text content from Google Doc, optionally limiting to first few paragraphs or stopping at a date"""
+def extract_lesson_date(content: str) -> Optional[str]:
+    """Extract lesson date from document content"""
+    lines = content.split('\n')[:10]  # Check first 10 lines
+    
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+            
+        # Look for date patterns
+        date_patterns = [
+            r'\b\d{1,2}/\d{1,2}/\d{2,4}\b',  # MM/DD/YYYY or M/D/YY
+            r'\b\d{1,2}-\d{1,2}-\d{2,4}\b',  # MM-DD-YYYY or M-D-YY
+            r'\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}\b',
+            r'\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},?\s+\d{4}\b',
+            r'\b\d{1,2}\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4}\b',
+            r'\b\d{1,2}\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}\b'
+        ]
+        
+        for pattern in date_patterns:
+            match = re.search(pattern, line, re.IGNORECASE)
+            if match:
+                try:
+                    parsed_date = parser.parse(match.group())
+                    return parsed_date.strftime('%Y-%m-%d')
+                except:
+                    continue
+    
+    return None
+
+def get_document_content(file_id: str) -> Optional[str]:
+    """Get document content from Google Docs API"""
     initialize_google_services()
     if not docs_service:
-        raise Exception("Google Docs service not available")
+        return None
     
     try:
         # Check cache first
-        cache_key = f"{file_id}_{max_paragraphs or 'full'}_{stop_at_date or 'no_date'}"
-        if cache_key in doc_cache:
-            return doc_cache[cache_key]['text']
+        if file_id in doc_cache:
+            logger.info(f"Document {file_id} found in cache")
+            return doc_cache[file_id]
         
-        doc = docs_service.documents().get(documentId=file_id).execute()
-        text_parts = []
-        paragraph_count = 0
+        # Get document from API
+        document = docs_service.documents().get(documentId=file_id).execute()
         
-        for element in doc.get("body", {}).get("content", []):
-            paragraph = element.get("paragraph")
-            if not paragraph:
-                continue
-            
-            # If we have a paragraph limit and we've reached it, stop
-            if max_paragraphs and paragraph_count >= max_paragraphs:
-                break
-            
-            paragraph_text = ""
-            for run in paragraph.get("elements", []):
-                text_run = run.get("textRun")
-                if text_run and text_run.get("content"):
-                    paragraph_text += text_run["content"]
-            
-            if paragraph_text.strip():  # Only count non-empty paragraphs
-                text_parts.append(paragraph_text)
-                paragraph_count += 1
-                
-                # If we have a stop date and we've hit it, stop reading
-                if stop_at_date and stop_at_date in paragraph_text:
-                    break
+        # Extract text content
+        content = ""
+        if 'body' in document and 'content' in document['body']:
+            for element in document['body']['content']:
+                if 'paragraph' in element:
+                    paragraph = element['paragraph']
+                    if 'elements' in paragraph:
+                        for elem in paragraph['elements']:
+                            if 'textRun' in elem:
+                                content += elem['textRun']['content']
         
-        partial_text = "".join(text_parts)
+        # Cache the document
+        doc_cache[file_id] = content
+        logger.info(f"Document {file_id} retrieved and cached")
+        return content
         
-        # Cache the result
-        doc_cache[cache_key] = {
-            'text': partial_text,
-            'name': doc.get("title", ""),
-            'cached_at': datetime.now(),
-            'is_partial': max_paragraphs is not None or stop_at_date is not None
-        }
-        
-        return partial_text
     except Exception as e:
-        logger.error(f"Error reading document {file_id}: {e}")
-        raise Exception(f"Google Docs error: {e}")
-
-def get_recent_lessons_from_doc(file_id: str, days_back: int = 7) -> str:
-    """Get recent lessons from a document, stopping when we hit older dates in headings"""
-    # Calculate the cutoff date
-    cutoff_date = datetime.now() - timedelta(days=days_back)
-    
-    # Common date formats in your documents
-    date_formats = [
-        "%a %d %b %y",  # "Thu 3 Jul 25"
-        "%A %d %B %Y",  # "Thursday 3 July 2025"  
-        "%d %b %y",     # "3 Jul 25"
-        "%d/%m/%y",     # "3/7/25"
-        "%d/%m/%Y",     # "3/7/2025"
-        "%Y-%m-%d",     # "2025-07-03"
-    ]
-    
-    def parse_date_from_heading(heading_text: str) -> Optional[datetime]:
-        """Try to parse a date from a heading"""
-        for fmt in date_formats:
-            try:
-                return datetime.strptime(heading_text.strip(), fmt)
-            except ValueError:
-                continue
+        logger.error(f"Error getting document {file_id}: {e}")
         return None
-    
+
+def get_all_documents() -> List[Dict[str, Any]]:
+    """Get all documents from Google Drive"""
     initialize_google_services()
-    if not docs_service:
-        raise Exception("Google Docs service not available")
+    if not drive_service:
+        return []
     
     try:
-        doc = docs_service.documents().get(documentId=file_id).execute()
-        recent_content = []
+        # Search for Google Docs files
+        query = "mimeType='application/vnd.google-apps.document'"
+        results = drive_service.files().list(
+            q=query,
+            pageSize=100,
+            fields="nextPageToken, files(id, name, createdTime, modifiedTime)"
+        ).execute()
         
-        for element in doc.get("body", {}).get("content", []):
-            paragraph = element.get("paragraph")
-            if not paragraph:
+        documents = []
+        items = results.get('files', [])
+        
+        for item in items:
+            # Get document content for metadata extraction
+            content = get_document_content(item['id'])
+            student_name = extract_student_name(item['name'])
+            lesson_date = extract_lesson_date(content) if content else None
+            
+            doc_info = {
+                'id': item['id'],
+                'name': item['name'],
+                'student_name': student_name,
+                'lesson_date': lesson_date,
+                'created_time': item.get('createdTime'),
+                'modified_time': item.get('modifiedTime'),
+                'token_count': count_tokens(content) if content else 0
+            }
+            documents.append(doc_info)
+        
+        # Sort by modified time (most recent first)
+        documents.sort(key=lambda x: x['modified_time'], reverse=True)
+        
+        logger.info(f"Retrieved {len(documents)} documents")
+        return documents
+        
+    except Exception as e:
+        logger.error(f"Error getting documents: {e}")
+        return []
+
+def filter_by_weekday(documents: List[Dict[str, Any]], weekday: str) -> List[Dict[str, Any]]:
+    """Filter documents by weekday"""
+    if not weekday:
+        return documents
+    
+    weekday_lower = weekday.lower()
+    filtered = []
+    
+    for doc in documents:
+        # Check if weekday is in the document name
+        if weekday_lower in doc['name'].lower():
+            filtered.append(doc)
+        # Check if weekday is in the lesson date
+        elif doc['lesson_date']:
+            try:
+                date_obj = datetime.strptime(doc['lesson_date'], '%Y-%m-%d')
+                doc_weekday = date_obj.strftime('%A').lower()
+                if weekday_lower in doc_weekday:
+                    filtered.append(doc)
+            except:
                 continue
-            
-            # Extract paragraph text
-            paragraph_text = ""
-            for run in paragraph.get("elements", []):
-                text_run = run.get("textRun")
-                if text_run and text_run.get("content"):
-                    paragraph_text += text_run["content"]
-            
-            # Check if this is a heading (check for heading style)
-            is_heading = False
-            paragraph_style = paragraph.get("paragraphStyle", {})
-            named_style_type = paragraph_style.get("namedStyleType", "")
-            
-            if "HEADING" in named_style_type:
-                is_heading = True
-                # Try to parse date from heading
-                parsed_date = parse_date_from_heading(paragraph_text)
-                if parsed_date and parsed_date < cutoff_date:
-                    # We've hit an old date, stop reading
-                    logger.info(f"Stopping at date: {parsed_date} (cutoff: {cutoff_date})")
-                    break
-            
-            if paragraph_text.strip():
-                recent_content.append(paragraph_text)
-        
-        return "".join(recent_content)
-    except Exception as e:
-        logger.error(f"Error reading recent lessons from document {file_id}: {e}")
-        raise Exception(f"Google Docs error: {e}")
-
-def create_embedding(text: str) -> List[float]:
-    """Create embedding for text using OpenAI"""
-    if not openai_client:
-        raise Exception("OpenAI client not initialized")
     
-    try:
-        response = openai_client.embeddings.create(
-            model="text-embedding-3-small",
-            input=text
-        )
-        return response.data[0].embedding
-    except Exception as e:
-        logger.error(f"OpenAI embedding error: {e}")
-        raise Exception(f"OpenAI error: {e}")
+    return filtered
 
-def cosine_similarity(a: List[float], b: List[float]) -> float:
-    """Calculate cosine similarity between two vectors"""
-    a_array = np.array(a)
-    b_array = np.array(b)
-    return np.dot(a_array, b_array) / (np.linalg.norm(a_array) * np.linalg.norm(b_array))
+def get_recent_documents(days: int = 30) -> List[Dict[str, Any]]:
+    """Get documents modified in the last N days"""
+    documents = get_all_documents()
+    cutoff_date = datetime.now() - timedelta(days=days)
+    
+    recent_docs = []
+    for doc in documents:
+        if doc['modified_time']:
+            try:
+                modified_date = parser.parse(doc['modified_time'])
+                if modified_date.replace(tzinfo=None) >= cutoff_date:
+                    recent_docs.append(doc)
+            except:
+                continue
+    
+    return recent_docs
 
-@app.route("/", methods=["GET"])
-def index():
-    """Root endpoint with API documentation"""
-    return {
+# API Routes
+@app.route('/')
+def home():
+    """API root endpoint"""
+    return jsonify({
         "name": "GPT Google Docs Proxy",
         "status": "ok",
         "endpoints": {
@@ -266,217 +315,257 @@ def index():
             "docs": {
                 "list_all": "/docs/all",
                 "read": "/docs/read?file_id=ID",
-                "batch": "/docs/batch",
-                "recent": "/docs/recent"
+                "recent": "/docs/recent",
+                "batch": "/docs/batch"
             },
             "search": "/search"
         }
-    }
+    })
 
-@app.route("/health", methods=["GET"])
+@app.route('/health')
 def health():
     """Health check endpoint"""
-    return {"status": "ok"}
+    return jsonify({"status": "ok"})
 
-@app.route("/docs/all", methods=["GET"])
+@app.route('/docs/all')
 def list_all_docs():
-    """List all Google Docs metadata"""
-    initialize_google_services()
-    if not drive_service:
-        return {"detail": "Google Drive service not available"}, 500
-    
+    """List all documents with metadata"""
     try:
-        # Get limit from query parameter
         limit = request.args.get('limit', type=int)
+        weekday = request.args.get('weekday', type=str)
         
-        # Search for Google Docs
-        results = drive_service.files().list(
-            q="mimeType='application/vnd.google-apps.document'",
-            fields="files(id, name)",
-            pageSize=limit or 1000
-        ).execute()
+        documents = get_all_documents()
         
-        items = results.get("files", [])
+        # Filter by weekday if specified
+        if weekday:
+            documents = filter_by_weekday(documents, weekday)
         
-        # Return basic info without token counts for speed
-        docs_list = []
-        for item in items:
-            docs_list.append({
-                "id": item["id"],
-                "name": item["name"],
-                "token_count": 0  # Will be calculated on-demand
-            })
+        # Apply limit if specified
+        if limit and limit > 0:
+            documents = documents[:limit]
         
-        return docs_list
+        return jsonify({
+            "documents": documents,
+            "total": len(documents)
+        })
+        
     except Exception as e:
-        logger.error(f"Error listing documents: {e}")
-        return {"detail": f"Error: {str(e)}"}, 500
+        logger.error(f"Error in list_all_docs: {e}")
+        return jsonify({"detail": f"Error: {str(e)}"}), 500
 
-@app.route("/docs/read", methods=["GET"])
-def read_doc_by_id():
-    """Get full text of a doc by file_id"""
-    file_id = request.args.get('file_id')
-    max_paragraphs = request.args.get('max_paragraphs', type=int)
-    
-    if not file_id:
-        return {"detail": "file_id parameter required"}, 400
-    
+@app.route('/docs/recent')
+def list_recent_docs():
+    """List recently modified documents"""
     try:
-        text = get_document_text(file_id, max_paragraphs=max_paragraphs)
-        return {
-            "id": file_id,
-            "text": text,
-            "char_count": len(text),
-            "token_count": count_tokens(text)
-        }
+        days = request.args.get('days', default=30, type=int)
+        limit = request.args.get('limit', type=int)
+        weekday = request.args.get('weekday', type=str)
+        
+        documents = get_recent_documents(days)
+        
+        # Filter by weekday if specified
+        if weekday:
+            documents = filter_by_weekday(documents, weekday)
+        
+        # Apply limit if specified
+        if limit and limit > 0:
+            documents = documents[:limit]
+        
+        return jsonify({
+            "documents": documents,
+            "total": len(documents),
+            "days": days
+        })
+        
     except Exception as e:
-        logger.error(f"Error reading document {file_id}: {e}")
-        return {"detail": f"Error: {str(e)}"}, 500
+        logger.error(f"Error in list_recent_docs: {e}")
+        return jsonify({"detail": f"Error: {str(e)}"}), 500
 
-@app.route("/docs/batch", methods=["POST"])
-def batch_read_docs():
-    """Get multiple docs by IDs"""
-    data = request.get_json()
-    doc_ids = data.get('doc_ids', [])
-    
-    if not doc_ids:
-        return {"detail": "doc_ids required"}, 400
-    
-    results = []
-    for doc_id in doc_ids:
-        try:
-            text = get_document_text(doc_id)
-            results.append({
-                "id": doc_id,
-                "text": text,
-                "char_count": len(text),
-                "token_count": count_tokens(text)
-            })
-        except Exception as e:
-            logger.error(f"Error reading document {doc_id}: {e}")
-            results.append({
-                "id": doc_id,
-                "error": str(e)
-            })
-    
-    return results
-
-@app.route("/docs/recent", methods=["GET"])
-def get_recent_lessons():
-    """Get recent lessons from documents, stopping at older dates in headings"""
-    student = request.args.get('student')
-    weekday = request.args.get('weekday')
-    days_back = request.args.get('days_back', default=7, type=int)
-    
-    initialize_google_services()
-    if not drive_service:
-        return {"detail": "Google Drive service not available"}, 500
-    
+@app.route('/docs/read')
+def read_document():
+    """Read a specific document by ID"""
     try:
-        # Get all documents
-        results = drive_service.files().list(
-            q="mimeType='application/vnd.google-apps.document'",
-            fields="files(id, name)",
-            pageSize=1000
-        ).execute()
+        file_id = request.args.get('file_id')
+        if not file_id:
+            return jsonify({"detail": "file_id parameter is required"}), 400
         
-        items = results.get("files", [])
-        recent_lessons = []
+        content = get_document_content(file_id)
+        if content is None:
+            return jsonify({"detail": "Document not found or error reading document"}), 404
         
-        for item in items:
-            # Filter by student if specified
-            if student and student.lower() not in item["name"].lower():
-                continue
-            
-            # Filter by weekday if specified
-            if weekday and weekday.lower() not in item["name"].lower():
-                continue
-            
+        # Get document metadata
+        initialize_google_services()
+        if drive_service:
             try:
-                recent_text = get_recent_lessons_from_doc(item["id"], days_back=days_back)
-                if recent_text.strip():
-                    recent_lessons.append({
-                        "id": item["id"],
-                        "name": item["name"],
-                        "recent_content": recent_text,
-                        "token_count": count_tokens(recent_text)
-                    })
-            except Exception as e:
-                logger.warning(f"Could not get recent lessons from {item['name']}: {e}")
-        
-        return recent_lessons
-    except Exception as e:
-        logger.error(f"Error getting recent lessons: {e}")
-        return {"detail": f"Error: {str(e)}"}, 500
-
-@app.route("/search", methods=["POST"])
-def search():
-    """Search within docs using embeddings"""
-    data = request.get_json()
-    query = data.get('query', '')
-    student = data.get('student', 'any')
-    n = data.get('n', 5)
-    
-    if not query:
-        return {"detail": "query required"}, 400
-    
-    if not openai_client:
-        return {"detail": "OpenAI client not available"}, 500
-    
-    initialize_google_services()
-    if not drive_service:
-        return {"detail": "Google Drive service not available"}, 500
-    
-    try:
-        # Create embedding for the query
-        query_embedding = create_embedding(query)
-        
-        # Get all documents
-        results = drive_service.files().list(
-            q="mimeType='application/vnd.google-apps.document'",
-            fields="files(id, name)",
-            pageSize=1000
-        ).execute()
-        
-        items = results.get("files", [])
-        search_results = []
-        
-        for item in items:
-            # Filter by student if specified
-            if student != 'any' and student.lower() not in item["name"].lower():
-                continue
-            
-            try:
-                # Get document text (recent content only)
-                text = get_recent_lessons_from_doc(item["id"], days_back=14)
-                if not text.strip():
-                    continue
+                file_info = drive_service.files().get(fileId=file_id, fields='name,createdTime,modifiedTime').execute()
+                student_name = extract_student_name(file_info['name'])
+                lesson_date = extract_lesson_date(content)
                 
-                # Create embedding for document
-                doc_embedding = create_embedding(text)
-                
-                # Calculate similarity
-                similarity = cosine_similarity(query_embedding, doc_embedding)
-                
-                # Extract excerpt (first 500 chars)
-                excerpt = text[:500] + ("..." if len(text) > 500 else "")
-                
-                search_results.append({
-                    "id": item["id"],
-                    "name": item["name"],
-                    "excerpt": excerpt,
-                    "token_count": count_tokens(excerpt),
-                    "similarity": similarity
+                return jsonify({
+                    "file_id": file_id,
+                    "name": file_info['name'],
+                    "student_name": student_name,
+                    "lesson_date": lesson_date,
+                    "content": content,
+                    "token_count": count_tokens(content),
+                    "created_time": file_info.get('createdTime'),
+                    "modified_time": file_info.get('modifiedTime')
                 })
             except Exception as e:
-                logger.warning(f"Could not search document {item['name']}: {e}")
+                logger.error(f"Error getting file metadata: {e}")
+                return jsonify({
+                    "file_id": file_id,
+                    "content": content,
+                    "token_count": count_tokens(content)
+                })
+        else:
+            return jsonify({
+                "file_id": file_id,
+                "content": content,
+                "token_count": count_tokens(content)
+            })
         
-        # Sort by similarity and return top n
-        search_results.sort(key=lambda x: x['similarity'], reverse=True)
-        return search_results[:n]
     except Exception as e:
-        logger.error(f"Error searching: {e}")
-        return {"detail": f"Error: {str(e)}"}, 500
+        logger.error(f"Error in read_document: {e}")
+        return jsonify({"detail": f"Error: {str(e)}"}), 500
 
-if __name__ == "__main__":
-    app.run(debug=True, host="0.0.0.0", port=5000)
+@app.route('/docs/batch', methods=['POST'])
+def batch_read_documents():
+    """Read multiple documents by IDs"""
+    try:
+        data = request.get_json()
+        if not data or 'file_ids' not in data:
+            return jsonify({"detail": "file_ids list is required in request body"}), 400
+        
+        file_ids = data['file_ids']
+        if not isinstance(file_ids, list):
+            return jsonify({"detail": "file_ids must be a list"}), 400
+        
+        documents = []
+        for file_id in file_ids:
+            content = get_document_content(file_id)
+            if content:
+                # Get document metadata
+                initialize_google_services()
+                if drive_service:
+                    try:
+                        file_info = drive_service.files().get(fileId=file_id, fields='name,createdTime,modifiedTime').execute()
+                        student_name = extract_student_name(file_info['name'])
+                        lesson_date = extract_lesson_date(content)
+                        
+                        documents.append({
+                            "file_id": file_id,
+                            "name": file_info['name'],
+                            "student_name": student_name,
+                            "lesson_date": lesson_date,
+                            "content": content,
+                            "token_count": count_tokens(content),
+                            "created_time": file_info.get('createdTime'),
+                            "modified_time": file_info.get('modifiedTime')
+                        })
+                    except Exception as e:
+                        logger.error(f"Error getting metadata for {file_id}: {e}")
+                        documents.append({
+                            "file_id": file_id,
+                            "content": content,
+                            "token_count": count_tokens(content),
+                            "error": f"Metadata error: {str(e)}"
+                        })
+                else:
+                    documents.append({
+                        "file_id": file_id,
+                        "content": content,
+                        "token_count": count_tokens(content)
+                    })
+        
+        return jsonify({
+            "documents": documents,
+            "total": len(documents)
+        })
+        
+    except Exception as e:
+        logger.error(f"Error in batch_read_documents: {e}")
+        return jsonify({"detail": f"Error: {str(e)}"}), 500
+
+@app.route('/search', methods=['POST'])
+def search_documents():
+    """Search documents using semantic search"""
+    try:
+        data = request.get_json()
+        if not data or 'query' not in data:
+            return jsonify({"detail": "query is required in request body"}), 400
+        
+        query = data['query']
+        limit = data.get('limit', 10)
+        weekday = data.get('weekday')
+        
+        if not openai_client:
+            return jsonify({"detail": "OpenAI API key not configured"}), 500
+        
+        # Get all documents
+        documents = get_all_documents()
+        
+        # Filter by weekday if specified
+        if weekday:
+            documents = filter_by_weekday(documents, weekday)
+        
+        if not documents:
+            return jsonify({"results": [], "total": 0})
+        
+        # Generate query embedding
+        try:
+            query_response = openai_client.embeddings.create(
+                model="text-embedding-ada-002",
+                input=query
+            )
+            query_embedding = np.array(query_response.data[0].embedding)
+        except Exception as e:
+            logger.error(f"Error generating query embedding: {e}")
+            return jsonify({"detail": f"Error generating query embedding: {str(e)}"}), 500
+        
+        # Calculate similarity scores
+        results = []
+        for doc in documents:
+            content = get_document_content(doc['id'])
+            if not content:
+                continue
+            
+            try:
+                # Generate document embedding
+                doc_response = openai_client.embeddings.create(
+                    model="text-embedding-ada-002",
+                    input=content[:8000]  # Limit to avoid token limits
+                )
+                doc_embedding = np.array(doc_response.data[0].embedding)
+                
+                # Calculate cosine similarity
+                similarity = np.dot(query_embedding, doc_embedding) / (
+                    np.linalg.norm(query_embedding) * np.linalg.norm(doc_embedding)
+                )
+                
+                results.append({
+                    "document": doc,
+                    "similarity": float(similarity),
+                    "content": content
+                })
+                
+            except Exception as e:
+                logger.error(f"Error processing document {doc['id']}: {e}")
+                continue
+        
+        # Sort by similarity and apply limit
+        results.sort(key=lambda x: x['similarity'], reverse=True)
+        results = results[:limit]
+        
+        return jsonify({
+            "query": query,
+            "results": results,
+            "total": len(results)
+        })
+        
+    except Exception as e:
+        logger.error(f"Error in search_documents: {e}")
+        return jsonify({"detail": f"Error: {str(e)}"}), 500
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000, debug=True)
