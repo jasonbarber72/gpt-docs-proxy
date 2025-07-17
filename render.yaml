@@ -1,28 +1,13 @@
-﻿services:
+services:
   - type: web
     name: gpt-docs-proxy
     env: python
+    buildCommand: pip install --upgrade pip setuptools wheel && pip install -e .
+    startCommand: gunicorn --bind 0.0.0.0:$PORT --reuse-port app_flask:app
     envVars:
-      - key: DOCS_SERVICE_URL
-        fromService: basic-service
       - key: OPENAI_API_KEY
-        fromSecret: OPENAI_API_KEY
-    buildCommand: pip install --upgrade pip setuptools wheel && pip install -r requirements.txt && pip install openai faiss-cpu numpy
-    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
-    routes:
-      - type: http
-        source: /
-        target: $PORT
-    plan: free
-
-  - type: worker
-    name: build-faiss-index
-    env: python
-    envVars:
-      - key: DOCS_SERVICE_URL
-        fromService: basic-service
-      - key: OPENAI_API_KEY
-        fromSecret: OPENAI_API_KEY
-    buildCommand: pip install --upgrade pip setuptools wheel && pip install -r requirements.txt && pip install openai faiss-cpu numpy
-    startCommand: python build_index.py
-    plan: free
+        sync: false
+      - key: GOOGLE_SERVICE_ACCOUNT_JSON
+        sync: false
+    healthCheckPath: /health
+    autoDeploy: true
