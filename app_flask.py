@@ -6,6 +6,7 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from openai import OpenAI
 from dotenv import load_dotenv
+import numpy as np
 
 load_dotenv()
 
@@ -24,6 +25,14 @@ SCOPES = [
 # Global services
 docs_service = None
 drive_service = None
+openai_client = None
+
+# Initialize OpenAI client
+if OPENAI_API_KEY:
+    openai_client = OpenAI(api_key=OPENAI_API_KEY)
+    logger.info("OpenAI client initialized successfully")
+else:
+    logger.warning("OpenAI API key not found")
 
 def initialize_google_services():
     global docs_service, drive_service
@@ -95,8 +104,8 @@ def list_all_docs():
         # Test query
         results = drive_service.files().list(
             q="mimeType='application/vnd.google-apps.document'",
-            pageSize=2,
-            fields="files(id, name)"
+            pageSize=50,
+            fields="files(id, name, createdTime, modifiedTime)"
         ).execute()
         
         documents = results.get('files', [])
@@ -145,6 +154,115 @@ def read_document():
         
     except Exception as e:
         logger.error(f"Error in read_document: {e}")
+        return jsonify({"detail": f"Error: {str(e)}"}), 500
+
+@app.route('/search', methods=['POST'])
+def search_documents():
+    """Search documents using semantic search"""
+    try:
+        data = request.get_json()
+        if not data or 'query' not in data:
+            return jsonify({"detail": "query is required in request body"}), 400
+        
+        query = data['query']
+        student = data.get('student', '')
+        n = data.get('n', 5)
+        
+        if not openai_client:
+            return jsonify({"detail": "OpenAI API key not configured"}), 500
+        
+        initialize_google_services()
+        
+        if not drive_service:
+            return jsonify({"detail": "Google Drive service not initialized"}), 500
+        
+        # Get all documents
+        results = drive_service.files().list(
+            q="mimeType='application/vnd.google-apps.document'",
+            pageSize=50,
+            fields="files(id, name, createdTime, modifiedTime)"
+        ).execute()
+        
+        documents = results.get('files', [])
+        
+        if not documents:
+            return jsonify({"results": [], "total": 0})
+        
+        # Generate query embedding
+        try:
+            query_response = openai_client.embeddings.create(
+                model="text-embedding-ada-002",
+                input=query
+            )
+            query_embedding = np.array(query_response.data[0].embedding)
+        except Exception as e:
+            logger.error(f"Error generating query embedding: {e}")
+            return jsonify({"detail": f"Error generating query embedding: {str(e)}"}), 500
+        
+        # Calculate similarity scores
+        search_results = []
+        for doc in documents:
+            try:
+                # Get document content
+                if not docs_service:
+                    continue
+                    
+                document = docs_service.documents().get(documentId=doc['id']).execute()
+                
+                # Extract text content
+                content = ""
+                if 'body' in document and 'content' in document['body']:
+                    for element in document['body']['content']:
+                        if 'paragraph' in element:
+                            paragraph = element['paragraph']
+                            if 'elements' in paragraph:
+                                for elem in paragraph['elements']:
+                                    if 'textRun' in elem:
+                                        content += elem['textRun']['content']
+                
+                if not content.strip():
+                    continue
+                
+                # Generate document embedding
+                doc_response = openai_client.embeddings.create(
+                    model="text-embedding-ada-002",
+                    input=content[:8000]  # Limit to avoid token limits
+                )
+                doc_embedding = np.array(doc_response.data[0].embedding)
+                
+                # Calculate cosine similarity
+                similarity = np.dot(query_embedding, doc_embedding) / (
+                    np.linalg.norm(query_embedding) * np.linalg.norm(doc_embedding)
+                )
+                
+                search_results.append({
+                    "document": {
+                        "id": doc['id'],
+                        "name": doc['name'],
+                        "created_time": doc.get('createdTime', ''),
+                        "modified_time": doc.get('modifiedTime', '')
+                    },
+                    "similarity": float(similarity),
+                    "content": content[:500] + "..." if len(content) > 500 else content
+                })
+                
+            except Exception as e:
+                logger.error(f"Error processing document {doc['id']}: {e}")
+                continue
+        
+        # Sort by similarity and apply limit
+        search_results.sort(key=lambda x: x['similarity'], reverse=True)
+        search_results = search_results[:n]
+        
+        return jsonify({
+            "query": query,
+            "student": student,
+            "results": search_results,
+            "total": len(search_results)
+        })
+        
+    except Exception as e:
+        logger.error(f"Error in search_documents: {e}")
         return jsonify({"detail": f"Error: {str(e)}"}), 500
 
 if __name__ == '__main__':
