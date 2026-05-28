@@ -1,3 +1,2 @@
-from app_flask import app as application
+from app_flask import app
 
-app = application
