@@ -74,20 +74,33 @@ def initialize_google_services():
     logger.error("No valid Google credentials found")
 
 
-def extract_doc_text(file_id):
+def extract_doc_text(file_id, max_chars=3000):
     document = docs_service.documents().get(documentId=file_id).execute()
 
     content = ""
+
     if "body" in document and "content" in document["body"]:
         for element in document["body"]["content"]:
+            if len(content) >= max_chars:
+                break
+
             if "paragraph" in element:
                 paragraph = element["paragraph"]
+
                 if "elements" in paragraph:
                     for elem in paragraph["elements"]:
                         if "textRun" in elem:
-                            content += elem["textRun"]["content"]
+                            text = elem["textRun"]["content"]
+                            remaining = max_chars - len(content)
+
+                            content += text[:remaining]
+
+                            if len(content) >= max_chars:
+                                break
 
     return content
+```
+
 
 
 @app.route("/")
