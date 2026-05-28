@@ -179,7 +179,7 @@ def search_documents():
         # Get all documents
         results = drive_service.files().list(
             q="mimeType='application/vnd.google-apps.document'",
-            pageSize=50,
+            pageSize=3,
             fields="files(id, name, createdTime, modifiedTime)"
         ).execute()
         
