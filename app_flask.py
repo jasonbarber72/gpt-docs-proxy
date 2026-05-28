@@ -1,11 +1,12 @@
 import os
 import json
 import logging
+
+from dotenv import load_dotenv
 from flask import Flask, request, jsonify
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from openai import OpenAI
-from dotenv import load_dotenv
 import numpy as np
 
 load_dotenv()
@@ -18,7 +19,7 @@ app = Flask(__name__)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SCOPES = [
     "https://www.googleapis.com/auth/documents.readonly",
-    "https://www.googleapis.com/auth/drive.metadata.readonly"
+    "https://www.googleapis.com/auth/drive.metadata.readonly",
 ]
 
 docs_service = None
@@ -45,14 +46,12 @@ def initialize_google_services():
             service_account_info = json.loads(service_account_json)
             creds = service_account.Credentials.from_service_account_info(
                 service_account_info,
-                scopes=SCOPES
+                scopes=SCOPES,
             )
-
             docs_service = build("docs", "v1", credentials=creds)
             drive_service = build("drive", "v3", credentials=creds)
-            logger.info("Successfully initialized Google services from environment")
+            logger.info("Google services initialized from environment")
             return
-
         except Exception as e:
             logger.error(f"Failed to initialize Google services from environment: {e}")
 
@@ -60,14 +59,12 @@ def initialize_google_services():
         try:
             creds = service_account.Credentials.from_service_account_file(
                 "service-account.json",
-                scopes=SCOPES
+                scopes=SCOPES,
             )
-
             docs_service = build("docs", "v1", credentials=creds)
             drive_service = build("drive", "v3", credentials=creds)
-            logger.info("Successfully initialized Google services from local file")
+            logger.info("Google services initialized from local file")
             return
-
         except Exception as e:
             logger.error(f"Failed to initialize Google services from local file: {e}")
 
@@ -84,23 +81,26 @@ def extract_doc_text(file_id, max_chars=3000):
             if len(content) >= max_chars:
                 break
 
-            if "paragraph" in element:
-                paragraph = element["paragraph"]
+            if "paragraph" not in element:
+                continue
 
-                if "elements" in paragraph:
-                    for elem in paragraph["elements"]:
-                        if "textRun" in elem:
-                            text = elem["textRun"]["content"]
-                            remaining = max_chars - len(content)
+            paragraph = element["paragraph"]
 
-                            content += text[:remaining]
+            if "elements" not in paragraph:
+                continue
 
-                            if len(content) >= max_chars:
-                                break
+            for elem in paragraph["elements"]:
+                if "textRun" not in elem:
+                    continue
+
+                text = elem["textRun"].get("content", "")
+                remaining = max_chars - len(content)
+                content += text[:remaining]
+
+                if len(content) >= max_chars:
+                    break
 
     return content
-```
-
 
 
 @app.route("/")
@@ -111,8 +111,8 @@ def home():
         "debug": {
             "has_env_var": bool(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")),
             "has_local_file": os.path.exists("service-account.json"),
-            "openai_configured": bool(OPENAI_API_KEY)
-        }
+            "openai_configured": bool(OPENAI_API_KEY),
+        },
     })
 
 
@@ -132,7 +132,7 @@ def list_all_docs():
         results = drive_service.files().list(
             q="mimeType='application/vnd.google-apps.document'",
             pageSize=50,
-            fields="files(id, name, createdTime, modifiedTime)"
+            fields="files(id, name, createdTime, modifiedTime)",
         ).execute()
 
         documents = results.get("files", [])
@@ -140,7 +140,7 @@ def list_all_docs():
         return jsonify({
             "documents": documents,
             "total": len(documents),
-            "status": "success"
+            "status": "success",
         })
 
     except Exception as e:
@@ -152,6 +152,7 @@ def list_all_docs():
 def read_document():
     try:
         file_id = request.args.get("file_id")
+
         if not file_id:
             return jsonify({"detail": "file_id parameter required"}), 400
 
@@ -160,12 +161,12 @@ def read_document():
         if not docs_service:
             return jsonify({"detail": "Google Docs service not initialized"}), 500
 
-        content = extract_doc_text(file_id)
+        content = extract_doc_text(file_id, max_chars=3000)
 
         return jsonify({
             "file_id": file_id,
             "content": content,
-            "status": "success"
+            "status": "success",
         })
 
     except Exception as e:
@@ -176,7 +177,7 @@ def read_document():
 @app.route("/search", methods=["POST"])
 def search_documents():
     try:
-        data = request.get_json()
+        data = request.get_json(silent=True)
 
         if not data or "query" not in data:
             return jsonify({"detail": "query is required in request body"}), 400
@@ -202,7 +203,7 @@ def search_documents():
         results = drive_service.files().list(
             q=drive_query,
             pageSize=5,
-            fields="files(id, name, createdTime, modifiedTime)"
+            fields="files(id, name, createdTime, modifiedTime)",
         ).execute()
 
         documents = results.get("files", [])
@@ -212,12 +213,12 @@ def search_documents():
                 "query": query,
                 "student": student,
                 "results": [],
-                "total": 0
+                "total": 0,
             })
 
         query_response = openai_client.embeddings.create(
             model="text-embedding-3-small",
-            input=query
+            input=query,
         )
         query_embedding = np.array(query_response.data[0].embedding)
 
@@ -225,16 +226,14 @@ def search_documents():
 
         for doc in documents:
             try:
-                content = extract_doc_text(doc["id"])
+                content = extract_doc_text(doc["id"], max_chars=3000)
 
                 if not content.strip():
                     continue
 
-                top_content = content[:3000]
-
                 doc_response = openai_client.embeddings.create(
                     model="text-embedding-3-small",
-                    input=top_content
+                    input=content,
                 )
                 doc_embedding = np.array(doc_response.data[0].embedding)
 
@@ -247,10 +246,10 @@ def search_documents():
                         "id": doc["id"],
                         "name": doc["name"],
                         "created_time": doc.get("createdTime", ""),
-                        "modified_time": doc.get("modifiedTime", "")
+                        "modified_time": doc.get("modifiedTime", ""),
                     },
                     "similarity": float(similarity),
-                    "content": top_content
+                    "content": content,
                 })
 
             except Exception as e:
@@ -264,7 +263,7 @@ def search_documents():
             "query": query,
             "student": student,
             "results": search_results,
-            "total": len(search_results)
+            "total": len(search_results),
         })
 
     except Exception as e:
