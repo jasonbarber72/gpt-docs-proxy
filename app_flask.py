@@ -191,7 +191,7 @@ def search_documents():
         # Generate query embedding
         try:
             query_response = openai_client.embeddings.create(
-                model="text-embedding-ada-002",
+                model="text-embedding-3-small",
                 input=query
             )
             query_embedding = np.array(query_response.data[0].embedding)
@@ -225,7 +225,7 @@ def search_documents():
                 
                 # Generate document embedding
                 doc_response = openai_client.embeddings.create(
-                    model="text-embedding-ada-002",
+                    model="text-embedding-3-small",
                     input=content[:8000]  # Limit to avoid token limits
                 )
                 doc_embedding = np.array(doc_response.data[0].embedding)
