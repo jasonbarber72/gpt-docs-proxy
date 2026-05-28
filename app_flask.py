@@ -226,7 +226,7 @@ def search_documents():
                 # Generate document embedding
                 doc_response = openai_client.embeddings.create(
                     model="text-embedding-3-small",
-                    input=content[:8000]  # Limit to avoid token limits
+                    input=content[:1000]  # Limit to avoid token limits
                 )
                 doc_embedding = np.array(doc_response.data[0].embedding)
                 
