@@ -156,18 +156,34 @@ def read_document():
         if not file_id:
             return jsonify({"detail": "file_id parameter required"}), 400
 
+        # Existing callers keep the original 3,000-character response.
+        # New callers may explicitly request a larger, bounded excerpt.
+        requested_max_chars = request.args.get("max_chars")
+        max_chars = 3000
+        if requested_max_chars is not None:
+            try:
+                max_chars = int(requested_max_chars)
+            except ValueError:
+                return jsonify({"detail": "max_chars must be an integer from 1 to 20000"}), 400
+            if not 1 <= max_chars <= 20000:
+                return jsonify({"detail": "max_chars must be an integer from 1 to 20000"}), 400
+
         initialize_google_services()
 
         if not docs_service:
             return jsonify({"detail": "Google Docs service not initialized"}), 500
 
-        content = extract_doc_text(file_id, max_chars=3000)
+        content = extract_doc_text(file_id, max_chars=max_chars)
 
-        return jsonify({
+        result = {
             "file_id": file_id,
             "content": content,
             "status": "success",
-        })
+        }
+        if requested_max_chars is not None:
+            result["character_limit"] = max_chars
+            result["at_character_limit"] = len(content) >= max_chars
+        return jsonify(result)
 
     except Exception as e:
         logger.error(f"Error in read_document: {e}")
